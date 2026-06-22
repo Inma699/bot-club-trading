@@ -6,7 +6,7 @@ import pandas_ta as ta
 import ccxt
 
 # === CONFIGURACIÓN DE TU INFRAESTRUCTURA ===
-# ⚠️ COPIA TU DIRECCIÓN DE EMAIL DE PIPEDREAM Y PÉGALA AQUÍ ABAJO (Mantén las comillas "")
+# ⚠️ PEGA AQUÍ TU DIRECCIÓN DE EMAIL PRIVADA DE PIPEDREAM
 EMAIL_DESTINO_PIPEDREAM = "emegsbbozraerrs@upload.pipedream.net"
 
 SYMBOL = "BTC/USDT:USDT" # Par BTCUSDTPERP en Bitget
@@ -50,7 +50,7 @@ def buscar_order_blocks():
         elif (close_ob > open_ob) and todas_rojas and (precio_actual < ema_actual):
             enviar_alerta_email(action="SELL", position="-1")
         else:
-            print("Escaneo finalizado: No hay patrones de Order Block válidos en esta vela.")
+            print("Escaneo Bitget OK: Sin señales en esta vela.")
             
     except Exception as e:
         print(f"Error escaneando Bitget: {e}")
@@ -70,9 +70,13 @@ def enviar_alerta_email(action, position):
         with smtplib.SMTP('localhost') as server:
             server.sendmail(msg['From'], [msg['To']], msg.as_string())
         print(f"🐋 ¡Email oficial enviado con éxito a tu Pipedream!")
+        time.sleep(1200) # Pausa de seguridad de 20 minutos tras enviar señal
     except Exception as e:
         print(f"Señal generada: {mensaje_oficial}. (Configurando envío de respaldo: {e})")
+        time.sleep(1200)
 
-# Ejecución única para el sistema Cron de Render (Sin bucle While)
-print("🚀 Iniciando radar rápido de Bitget...")
-buscar_order_blocks()
+# Bucle continuo e infinito para el servidor gratuito las 24 horas
+print("🚀 Bot Club Autónomo encendido en la nube... Escaneando Bitget 24/7")
+while True:
+    buscar_order_blocks()
+    time.sleep(60) # Revisa el mercado de forma automática cada 60 segundos
