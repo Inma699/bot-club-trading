@@ -44,44 +44,35 @@ def buscar_order_blocks():
         ema_actual = df.iloc[-1]['ema_200']
         
         # === GATILLOS DE ALERTA CONECTADOS A TU FILTRO MACRO ===
-        # Bullish OB: Vela OB roja + 5 velas verdes seguidas + Precio sobre EMA 200
         if (close_ob < open_ob) and todas_verdes and (precio_actual > ema_actual):
             enviar_alerta_email(action="BUY", position="1")
             
-        # Bearish OB: Vela OB verde + 5 velas rojas seguidas + Precio bajo EMA 200
         elif (close_ob > open_ob) and todas_rojas and (precio_actual < ema_actual):
             enviar_alerta_email(action="SELL", position="-1")
+        else:
+            print("Escaneo finalizado: No hay patrones de Order Block válidos en esta vela.")
             
     except Exception as e:
         print(f"Error escaneando Bitget: {e}")
 
 def enviar_alerta_email(action, position):
-    # Formato de texto estricto y obligatorio que exige tu filtro de Gmail y Pipedream
     mensaje_oficial = (
         f"New Señal BTCUSDT Order Block Finder + EMA 200 Estrategia (DARK, 5, 0, 200): "
         f"orden {action} @ 1 efectuada en BTCUSDTPERP. La nueva posición estratégica es {position}"
     )
     
-    # Configuramos el correo electrónico de forma nativa para el servidor local gratuito
     msg = MIMEText(mensaje_oficial)
-    msg['Subject'] = 'New Señal BTCUSDT' # El asunto obligatorio que lee tu filtro
+    msg['Subject'] = 'New Señal BTCUSDT'
     msg['From'] = 'bot@clubtrading.com'
     msg['To'] = EMAIL_DESTINO_PIPEDREAM
     
     try:
-        # Render permite enviar correos salientes directos mediante localhost
         with smtplib.SMTP('localhost') as server:
             server.sendmail(msg['From'], [msg['To']], msg.as_string())
         print(f"🐋 ¡Email oficial enviado con éxito a tu Pipedream!")
-        time.sleep(1200) # Pausa de seguridad de 20 minutos
     except Exception as e:
-        # Si el servidor local de Render requiere retransmisión externa, imprimimos en consola
         print(f"Señal generada: {mensaje_oficial}. (Configurando envío de respaldo: {e})")
-        # En la nube, si falla el smtp local, forzamos un log legible para copiar la señal
-        time.sleep(1200)
 
-# Bucle continuo: El servidor ejecuta el radar cada 60 segundos de forma indefinida
-print("🚀 Bot Club Autónomo en Python encendido... Escaneando Bitget 24/7")
-while True:
-    buscar_order_blocks()
-    time.sleep(60)
+# Ejecución única para el sistema Cron de Render (Sin bucle While)
+print("🚀 Iniciando radar rápido de Bitget...")
+buscar_order_blocks()
