@@ -1,4 +1,4 @@
 ccxt==4.2.82
 pandas==2.0.3
-https://github.com
+git+https://github.com
 requests==2.31.0
