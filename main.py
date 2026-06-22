@@ -7,8 +7,8 @@ import ccxt
 
 # === CONFIGURACIÓN DE SEGURIDAD PARA TELEGRAM ===
 # El bot lee los tokens desde el búnker de Render, protegiendo tu canal
-TOKEN_TELEGRAM = os.environ.get("8900754319:AAHkDXeriezjDvREzf21iHwX73rB_38bfSo")
-ID_CHAT_CANAL  = os.environ.get("-1003908093232")
+TOKEN_TELEGRAM = os.environ.get("TELEGRAM_TOKEN")
+ID_CHAT_CANAL  = os.environ.get("TELEGRAM_CHAT_ID")
 
 SYMBOL = "BTC/USDT:USDT" # Par BTCUSDTPERP en Bitget
 TIMEFRAME = "15m"
