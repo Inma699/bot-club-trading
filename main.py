@@ -57,7 +57,8 @@ def calcular_ema(precios_cierre, periodo=200):
     if len(precios_cierre) < periodo:
         return None
     k = 2 / (periodo + 1)
-    ema = prices_initial = precios_cierre[0]
+    # CORRECCIÓN: Inicializamos la EMA con el primer precio de la lista de forma limpia
+    ema = precios_cierre[0]
     for precio in precios_cierre[1:]:
         ema = (precio * k) + (ema * (1 - k))
     return ema
@@ -65,6 +66,9 @@ def calcular_ema(precios_cierre, periodo=200):
 # === BUCLE DE MONITOREO EN TIEMPO REAL (ESCANEO CADA 60 SEGUNDOS) ===
 def motor_de_trading():
     print("🚀 Motor analítico real conectado a Binance... Analizando mercado.")
+    
+    # Pausa corta de 5 segundos para asegurar que Flask se levante primero en Render
+    time.sleep(5)
     
     # Alerta inmediata para certificar que las llaves de Render funcionan
     alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 El algoritmo se ha conectado con éxito al mercado en vivo. Escaneando BTCUSDT minuto a minuto..."
@@ -75,7 +79,7 @@ def motor_de_trading():
             datos = obtener_datos_binance()
             if datos:
                 # Cambiamos las velas de texto a números decimales
-                cierres = [float(vela[4]) for vela in datos]
+                cierres = [float(vela[4]) for vela in datos]  # El índice 4 corresponde al precio de cierre real en la API
                 precio_actual = cierres[-1]
                 
                 # Calculamos la EMA 200 macro
@@ -101,7 +105,7 @@ def motor_de_trading():
                         continue
 
             print("🔍 Escaneo completado. Sin cambios. Próximo análisis en 60 segundos...")
-            time.sleep(60)  # Tu escaneo rápido minuto a minuto
+            time.sleep(60)  
             
         except Exception as e:
             print(f"⚠️ Error en el bucle de trading: {e}")
