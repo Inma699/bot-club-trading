@@ -21,7 +21,7 @@ def enviar_senal_telegram(mensaje):
         print("❌ Error: Faltan las variables secretas en el panel de Render.")
         return
         
-    url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
+    url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
     payload = {
         "chat_id": CHAT_ID_CANAL,
         "text": mensaje,
@@ -37,7 +37,7 @@ def enviar_senal_telegram(mensaje):
         print(f"⚠️ Error de red al conectar con Telegram: {e}")
 
 def obtener_datos_binance():
-    """Conecta en tiempo real con la API pública de Binance para extraer las últimas 200 velas"""
+    """Conecta en tiempo real con la API pública de Binance para extraer las últimas 210 velas"""
     url = "https://binance.com"
     params = {
         "symbol": "BTCUSDT",
@@ -53,11 +53,10 @@ def obtener_datos_binance():
     return None
 
 def calcular_ema(precios_cierre, periodo=200):
-    """Calcula matemáticamente la EMA 200 exacta igual que TradingView"""
+    """Calcula matemáticamente la EMA 200 exacta sobre la lista de precios"""
     if len(precios_cierre) < periodo:
         return None
     k = 2 / (periodo + 1)
-    # CORRECCIÓN: Inicializamos la EMA con el primer precio de la lista de forma limpia
     ema = precios_cierre[0]
     for precio in precios_cierre[1:]:
         ema = (precio * k) + (ema * (1 - k))
@@ -67,19 +66,19 @@ def calcular_ema(precios_cierre, periodo=200):
 def motor_de_trading():
     print("🚀 Motor analítico real conectado a Binance... Analizando mercado.")
     
-    # Pausa corta de 5 segundos para asegurar que Flask se levante primero en Render
+    # Pausa de seguridad de 5 segundos para que Flask levante el puerto 10000 en Render
     time.sleep(5)
     
-    # Alerta inmediata para certificar que las llaves de Render funcionan
-    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 El algoritmo se ha conectado con éxito al mercado en vivo. Escaneando BTCUSDT minuto a minuto..."
+    # Alerta de confirmación inmediata al arrancar el búnker de Python
+    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 El algoritmo se ha conectado con éxito al mercado en vivo. Escaneando BTCUSDT en intervalos de 15 minutos de forma automática..."
     enviar_senal_telegram(alerta_inicio)
     
     while True:
         try:
             datos = obtener_datos_binance()
             if datos:
-                # Cambiamos las velas de texto a números decimales
-                cierres = [float(vela[4]) for vela in datos]  # El índice 4 corresponde al precio de cierre real en la API
+                # CORRECCIÓN VITAL: El índice [4] dentro de los datos de Binance corresponde exactamente al precio de Cierre (Close)
+                cierres = [float(vela[4]) for vela in datos]
                 precio_actual = cierres[-1]
                 
                 # Calculamos la EMA 200 macro
@@ -104,7 +103,7 @@ def motor_de_trading():
                         time.sleep(900)  # Si hay señal, espera 15 min a que cierre la vela
                         continue
 
-            print("🔍 Escaneo completado. Sin cambios. Próximo análisis en 60 segundos...")
+            print("🔍 Escaneo completado. Mercado estable. Próximo análisis en 60 segundos...")
             time.sleep(60)  
             
         except Exception as e:
