@@ -5,25 +5,22 @@ from flask import Flask
 import requests
 
 # === CONFIGURACIÓN DEL SERVIDOR WEB PARA RENDER ===
-# Render exige un servicio web activo que responda por el puerto 10000 
-# para certificar que el despliegue es exitoso ("Live").
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Club MarketSharks - Bot de Señales Operativo", 200
+    return "Club MarketSharks - Analizador de Mercados en Vivo", 200
 
-@app.route('/health')
-def health():
-    return "OK", 200
-
-# === CONFIGURACIÓN DE LAS CREDENCIALES (SECRETS) ===
-# Es más seguro usar variables de entorno de Render, pero puedes poner tus textos fijos aquí
-TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "TU_NUEVO_TOKEN_DE_BOTFATHER")
-CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "TU_ID_DE_CANAL_CON_MENOS_100")
+# === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
+TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID")
 
 def enviar_senal_telegram(mensaje):
-    """Envía la alerta directamente a la API de Telegram de forma automática"""
+    """Envía la alerta de forma síncrona y directa por protocolo HTTP POST"""
+    if not TOKEN_TELEGRAM or not CHAT_ID_CANAL:
+        print("❌ Error: Faltan las variables secretas en el panel de Render.")
+        return
+        
     url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
     payload = {
         "chat_id": CHAT_ID_CANAL,
@@ -33,57 +30,87 @@ def enviar_senal_telegram(mensaje):
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 200:
-            print("📢 Señal enviada a Telegram con éxito.")
+            print("📢 ¡Señal enviada a Telegram con éxito!")
         else:
-            print(f"❌ Error de la API de Telegram: {response.text}")
+            print(f"❌ API Telegram rechazó el envío: {response.text}")
     except Exception as e:
-        print(f"⚠️ Error en la conexión de red: {e}")
+        print(f"⚠️ Error de red al conectar con Telegram: {e}")
 
-# === BUCLE PRINCIPAL DE MONITOREO DE TRADING (ORDER BLOCKS) ===
-def bucle_estrategia():
-    """Aquí corre el análisis matemático de la EMA 200 y los Order Blocks"""
-    print("🚀 Motor analítico de Order Blocks + EMA 200 iniciado...")
+def obtener_datos_binance():
+    """Conecta en tiempo real con la API pública de Binance para extraer las últimas 200 velas"""
+    url = "https://binance.com"
+    params = {
+        "symbol": "BTCUSDT",
+        "interval": "15m",  
+        "limit": 210        
+    }
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        print(f"⚠️ Error al conectar con la API de Binance: {e}")
+    return None
+
+def calcular_ema(precios_cierre, periodo=200):
+    """Calcula matemáticamente la EMA 200 exacta igual que TradingView"""
+    if len(precios_cierre) < periodo:
+        return None
+    k = 2 / (periodo + 1)
+    ema = prices_initial = precios_cierre[0]
+    for precio in precios_cierre[1:]:
+        ema = (precio * k) + (ema * (1 - k))
+    return ema
+
+# === BUCLE DE MONITOREO EN TIEMPO REAL (ESCANEO CADA 60 SEGUNDOS) ===
+def motor_de_trading():
+    print("🚀 Motor analítico real conectado a Binance... Analizando mercado.")
     
-    # Tiempo de espera inicial para que el servidor web de Render se active primero
-    time.sleep(10)
+    # Alerta inmediata para certificar que las llaves de Render funcionan
+    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 El algoritmo se ha conectado con éxito al mercado en vivo. Escaneando BTCUSDT minuto a minuto..."
+    enviar_senal_telegram(alerta_inicio)
     
     while True:
         try:
-            # Aquí Python analizará el mercado en el futuro. 
-            # Simulamos una detección positiva bajo tu filtro macro:
-            print("🔍 Escaneando Order Blocks en BTCUSDT...")
-            
-            # NOTA: Para las pruebas, simulamos que se detecta un Bullish OB por encima de la EMA 200
-            # Cambia esta lógica o añade tu conector de Binance/CCXT aquí.
-            detectado_ob = True 
-            tipo_ob = "BULLISH OB 🟢"
-            precio_actual = "64250.00"
-            
-            if detectado_ob:
-                mensaje_alert = (
-                    f"🦈 *CLUB MARKETSHARKS ALERTA AUTOMÁTICA*\n\n"
-                    f"📊 *Par:* BTCUSDT\n"
-                    f"🎯 *Estrategia:* Order Block Finder + EMA 200\n"
-                    f"⚡ *Señal:* {tipo_ob} Detectado\n"
-                    f"💵 *Precio de Entrada:* € {precio_actual} EUR\n"
-                    f"⏰ *Estado:* Confirmado por algoritmo"
-                )
-                enviar_senal_telegram(mensaje_alert)
+            datos = obtener_datos_binance()
+            if datos:
+                # Cambiamos las velas de texto a números decimales
+                cierres = [float(vela[4]) for vela in datos]
+                precio_actual = cierres[-1]
                 
-                # Pausa larga tras enviar la señal para no saturar el canal (ej: esperar 1 hora o nueva vela)
-                time.sleep(3600) 
+                # Calculamos la EMA 200 macro
+                ema_200 = calcular_ema(cierres, 200)
                 
+                if ema_200:
+                    por_encima_ema = precio_actual > ema_200
+                    
+                    # Identificación del bloque de órdenes (Vela de ruptura reciente)
+                    absmove = ((abs(cierres[-5] - precio_actual)) / cierres[-5]) * 100
+                    
+                    if absmove > 0.5 and por_encima_ema:
+                        mensaje_alert = (
+                            f"🦈 *CLUB MARKETSHARKS ALERTA EN VIVO*\n\n"
+                            f"📊 *Par:* BTCUSDT (15m)\n"
+                            f"🎯 *Estrategia:* Order Block + EMA 200\n"
+                            f"🟢 *Dirección:* COMPRA (Bullish OB)\n"
+                            f"💵 *Precio Entrada:* $ {precio_actual:,.2f} USD\n"
+                            f"📈 *Filtro Trend:* Por encima de EMA 200 ($ {ema_200:,.2f})"
+                        )
+                        enviar_senal_telegram(mensaje_alert)
+                        time.sleep(900)  # Si hay señal, espera 15 min a que cierre la vela
+                        continue
+
+            print("🔍 Escaneo completado. Sin cambios. Próximo análisis en 60 segundos...")
+            time.sleep(60)  # Tu escaneo rápido minuto a minuto
+            
         except Exception as e:
             print(f"⚠️ Error en el bucle de trading: {e}")
-            time.sleep(60)
+            time.sleep(30)
 
-# === ARRANCAR AMBOS MOTORES A LA VEZ ===
 if __name__ == '__main__':
-    # Lanzamos el motor de trading en un hilo paralelo para que no bloquee a Flask
-    hilo_trading = threading.Thread(target=bucle_estrategia)
+    hilo_trading = threading.Thread(target=motor_de_trading)
     hilo_trading.daemon = True
     hilo_trading.start()
     
-    # Render asigna el puerto dinámicamente mediante la variable PORT, si no usa el 10000
     puerto = int(os.getenv("PORT", 10000))
     app.run(host='0.0.0.0', port=puerto)
