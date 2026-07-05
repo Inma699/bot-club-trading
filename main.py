@@ -8,8 +8,9 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Club MarketSharks - Clon Matemático TradingView Activo", 200
+    return "Club MarketSharks - Clon Matemático Corregido", 200
 
+# === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -34,10 +35,8 @@ def obtener_datos_binance():
         return None
 
 def calcular_ema_tradingview(precios_cierre, periodo=200):
-    """Calcula la EMA usando el método de suavizado exacto de TradingView"""
     if len(precios_cierre) < periodo:
         return None
-    # TradingView inicializa la EMA con la media aritmética (SMA) de los primeros periodos
     sma_inicial = sum(precios_cierre[:periodo]) / periodo
     alpha = 2 / (periodo + 1)
     ema = sma_inicial
@@ -45,58 +44,63 @@ def calcular_ema_tradingview(precios_cierre, periodo=200):
         ema = (precio * alpha) + (ema * (1 - alpha))
     return ema
 
+# === BUCLE DE TRADING AUTOMÁTICO ===
 def motor_de_trading():
-    print("🚀 Motor espejo TradingView iniciado...")
+    print("🚀 Motor espejo corregido iniciado...")
     time.sleep(5)
+    
+    # Alerta inmediata de inicio para confirmar la conexión de red
+    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 El algoritmo se ha conectado con éxito al mercado en vivo. Escaneando BTCUSDT en intervalos de 15 minutos de forma automática..."
+    enviar_senal_telegram(alerta_inicio)
     
     while True:
         try:
             datos = obtener_datos_binance()
             if datos:
-                # En Binance: index 1=Open, 2=High, 3=Low, 4=Close
-                aperturas = [float(v[1]) for v in datos]
-                altos     = [float(v[2]) for v in datos]
-                bajos     = [float(v[3]) for v in datos]
-                cierres   = [float(v[4]) for v in datos]
+                # CORRECCIÓN DE LA ESTRUCTURA DE BINANCE:
+                # index 1 = Open, 4 = Close
+                aperturas = [float(vela[1]) for vela in datos]
+                cierres   = [float(vela[4]) for vela in datos]
                 
                 precio_actual = cierres[-1]
                 ema_200 = calcular_ema_tradingview(cierres, 200)
                 
                 if ema_200:
-                    # Filtro original: Precio por encima de la EMA 200 Amarilla
                     por_encima_ema = precio_actual > ema_200
-                    
-                    # === LÓGICA CLONADA DE TU PINE SCRIPT ===
-                    # ob_period = periods + 1 (5 + 1 = 6 velas atrás)
                     idx_ob = -6 
                     
-                    # 1. Bullish Order Block Identification (Vela de origen bajista)
+                    # Lógica Clonada de TradingView (Periods = 5, Threshold = 0.5)
                     bullishOB = cierres[idx_ob] < aperturas[idx_ob]
                     
-                    # 2. Las siguientes 5 velas deben ser ALCISTAS consecutivas
                     upcandles = 0
-                    for i in range(-5, 0): # Revisa las últimas 5 velas cerradas
+                    for i in range(-5, 0): 
                         if cierres[i] > aperturas[i]:
                             upcandles += 1
                             
-                    # 3. Movimiento mínimo de umbral (Percent move >= 0.5)
                     absmove = (abs(cierres[idx_ob] - precio_actual) / cierres[idx_ob]) * 100
                     relmove = absmove >= 0.5
                     
-                    # GATILLO DE ENTRADA EFECTUADO
                     OB_bull_detectado = bullishOB and (upcandles == 5) and relmove and por_encima_ema
                     
                     if OB_bull_detectado:
+                        # Cálculo Dinámico del Stop Loss (Mínimo de la vela del OB que es index 3 en Binance)
+                        stop_loss = float(datos[idx_ob][3]) 
+                        distancia_sl = precio_actual - stop_loss
+                        take_profit = precio_actual + (distancia_sl * 2) # Relación Riesgo/Beneficio 1:2
+                        
                         mensaje_alert = (
                             f"🦈 *CLUB MARKETSHARKS ALERTA EN VIVO*\n\n"
                             f"📊 *Par:* BTCUSDT (15m)\n"
                             f"🎯 *Estrategia:* Order Block + EMA 200\n"
-                            f"🟢 *Señal:* BULLISH OB Confirmado\n"
+                            f"🟢 *Dirección:* COMPRA (Bullish OB Confirmado)\n\n"
                             f"💵 *Precio Entrada:* $ {precio_actual:,.2f} USD\n"
-                            f"📈 *Filtro Trend:* Por encima de EMA 200 ($ {ema_200:,.2f})"
+                            f"🛡️ *Stop Loss (SL):* $ {stop_loss:,.2f} USD\n"
+                            f"💰 *Take Profit (TP):* $ {take_profit:,.2f} USD\n"
+                            f"⚙️ *Apalancamiento:* 10x - 20x (Recomendado)\n\n"
+                            f"📈 *Filtro Trend:* Operación por encima de EMA 200 ($ {ema_200:,.2f})"
                         )
                         enviar_senal_telegram(mensaje_alert)
-                        time.sleep(900) # Evita duplicados durante la misma vela de 15m
+                        time.sleep(900) 
                         continue
 
             print("🔍 Escaneo completado minuto a minuto. Analizando mercado...")
