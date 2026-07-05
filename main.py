@@ -77,7 +77,7 @@ def motor_de_trading():
         try:
             datos = obtener_datos_binance()
             if datos:
-                # CORRECCIÓN VITAL: El índice [4] dentro de los datos de Binance corresponde exactamente al precio de Cierre (Close)
+                # El índice [4] dentro de los datos de Binance corresponde exactamente al precio de Cierre (Close)
                 cierres = [float(vela[4]) for vela in datos]
                 precio_actual = cierres[-1]
                 
@@ -91,13 +91,29 @@ def motor_de_trading():
                     absmove = ((abs(cierres[-5] - precio_actual)) / cierres[-5]) * 100
                     
                     if absmove > 0.5 and por_encima_ema:
+                        # === CÁLCULO AUTOMÁTICO DE GESTIÓN DE RIESGO INSTITUCIONAL ===
+                        # Calculamos el Stop Loss dinámico usando el mínimo de la vela del Order Block (vela -6)
+                        vela_ob = datos[-6]
+                        stop_loss = float(vela_ob[3]) # Índice 3 es el Low (Mínimo) en Binance
+                        
+                        # Control de seguridad: Si el mínimo está muy lejos, usamos un margen estándar de $150
+                        if (precio_actual - stop_loss) > 500 or stop_loss >= precio_actual:
+                            stop_loss = precio_actual - 150.00
+                            
+                        # El Take Profit busca el doble de beneficio que lo que arriesga el Stop Loss (Ratio 1:2)
+                        distancia_riesgo = precio_actual - stop_loss
+                        take_profit = precio_actual + (distancia_riesgo * 2)
+                        
                         mensaje_alert = (
                             f"🦈 *CLUB MARKETSHARKS ALERTA EN VIVO*\n\n"
                             f"📊 *Par:* BTCUSDT (15m)\n"
                             f"🎯 *Estrategia:* Order Block + EMA 200\n"
-                            f"🟢 *Dirección:* COMPRA (Bullish OB)\n"
+                            f"🟢 *Dirección:* COMPRA (Bullish OB Confirmado)\n\n"
                             f"💵 *Precio Entrada:* $ {precio_actual:,.2f} USD\n"
-                            f"📈 *Filtro Trend:* Por encima de EMA 200 ($ {ema_200:,.2f})"
+                            f"🛡️ *Stop Loss (SL):* $ {stop_loss:,.2f} USD\n"
+                            f"💰 *Take Profit (TP):* $ {take_profit:,.2f} USD\n"
+                            f"⚙️ *Apalancamiento:* 10x - 20x (Recomendado)\n\n"
+                            f"📈 *Filtro Trend:* Operación por encima de EMA 200 ($ {ema_200:,.2f})"
                         )
                         enviar_senal_telegram(mensaje_alert)
                         time.sleep(900)  # Si hay señal, espera 15 min a que cierre la vela
