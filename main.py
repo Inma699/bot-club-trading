@@ -4,105 +4,100 @@ import time
 from flask import Flask
 import requests
 
-# === CONFIGURACIÓN DEL SERVIDOR WEB PARA RENDER ===
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Club MarketSharks - Analizador de Mercados en Vivo", 200
+    return "Club MarketSharks - Algoritmo Espejo TradingView Activo", 200
 
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID")
 
 def enviar_senal_telegram(mensaje):
-    """Envía la alerta de forma síncrona y directa por protocolo HTTP POST"""
     if not TOKEN_TELEGRAM or not CHAT_ID_CANAL:
-        print("❌ Error: Faltan las variables secretas en el panel de Render.")
         return
-        
-    url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID_CANAL,
-        "text": mensaje,
-        "parse_mode": "Markdown"
-    }
+    url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
+    payload = {"chat_id": CHAT_ID_CANAL, "text": mensaje, "parse_mode": "Markdown"}
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            print("📢 ¡Señal enviada a Telegram con éxito!")
-        else:
-            print(f"❌ API Telegram rechazó el envío: {response.text}")
-    except Exception as e:
-        print(f"⚠️ Error de red al conectar con Telegram: {e}")
+        requests.post(url, json=payload, timeout=10)
+    except:
+        pass
 
 def obtener_datos_binance():
-    """Conecta en tiempo real con la API pública de Binance para extraer las últimas 210 velas"""
     url = "https://binance.com"
-    params = {
-        "symbol": "BTCUSDT",
-        "interval": "15m",  
-        "limit": 210        
-    }
+    params = {"symbol": "BTCUSDT", "interval": "15m", "limit": 210}
     try:
         response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             return response.json()
-    except Exception as e:
-        print(f"⚠️ Error al conectar con la API de Binance: {e}")
-    return None
+    except:
+        return None
 
-def calcular_ema(precios_cierre, periodo=200):
-    """Calcula matemáticamente la EMA 200 exacta sobre la lista de precios"""
+def calcular_ema_tradingview(precios_cierre, periodo=200):
+    """Calcula la EMA usando el método de suavizado exacto de TradingView (SMA inicial + Alpha)"""
     if len(precios_cierre) < periodo:
         return None
-    k = 2 / (periodo + 1)
-    ema = precios_cierre[0]
-    for precio in precios_cierre[1:]:
-        ema = (precio * k) + (ema * (1 - k))
+    sma_inicial = sum(precios_cierre[:periodo]) / periodo
+    alpha = 2 / (periodo + 1)
+    ema = sma_inicial
+    for precio in precios_cierre[periodo:]:
+        ema = (precio * alpha) + (ema * (1 - alpha))
     return ema
 
-# === BUCLE DE MONITOREO EN TIEMPO REAL (ESCANEO CADA 60 SEGUNDOS) ===
+# === BUCLE DE TRADING EN TIEMPO REAL ===
 def motor_de_trading():
-    print("🚀 Motor analítico real conectado a Binance... Analizando mercado.")
-    
-    # Pausa de seguridad de 5 segundos para que Flask levante el puerto 10000 en Render
+    print("🚀 Iniciando motor analítico duplicador de TradingView...")
     time.sleep(5)
     
-    # Alerta de confirmación inmediata al arrancar el búnker de Python
-    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 El algoritmo se ha conectado con éxito al mercado en vivo. Escaneando BTCUSDT en intervalos de 15 minutos de forma automática..."
+    # Alerta inmediata de inicio para confirmar que Render y Telegram están conectados
+    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Algoritmo de sincronización activado. Escaneando el mercado en vivo clonando la estrategia de TradingView..."
     enviar_senal_telegram(alerta_inicio)
     
     while True:
         try:
             datos = obtener_datos_binance()
             if datos:
-                # El índice [4] dentro de los datos de Binance corresponde exactamente al precio de Cierre (Close)
-                cierres = [float(vela[4]) for vela in datos]
-                precio_actual = cierres[-1]
+                # Estructura de Binance: [1]=Open, [2]=High, [3]=Low, [4]=Close
+                aperturas = [float(vela[1]) for vela in datos]
+                altos     = [float(vela[2]) for vela in datos]
+                bajos     = [float(vela[3]) for vela in datos]
+                cierres   = [float(vela[4]) for vela in datos]
                 
-                # Calculamos la EMA 200 macro
-                ema_200 = calcular_ema(cierres, 200)
+                precio_actual = cierres[-1]
+                ema_200 = calcular_ema_tradingview(cierres, 200)
                 
                 if ema_200:
                     por_encima_ema = precio_actual > ema_200
                     
-                    # Identificación del bloque de órdenes (Vela de ruptura reciente)
-                    absmove = ((abs(cierres[-5] - precio_actual)) / cierres[-5]) * 100
+                    # En tu Pine Script: ob_period = periods + 1 (5 + 1 = 6 velas hacia atrás)
+                    # Analizamos la vela origen del bloque de órdenes
+                    idx_ob = -6 
                     
-                    if absmove > 0.5 and por_encima_ema:
-                        # === CÁLCULO AUTOMÁTICO DE GESTIÓN DE RIESGO INSTITUCIONAL ===
-                        # Calculamos el Stop Loss dinámico usando el mínimo de la vela del Order Block (vela -6)
-                        vela_ob = datos[-6]
-                        stop_loss = float(vela_ob[3]) # Índice 3 es el Low (Mínimo) en Binance
+                    # 1. Bullish Order Block Identification (La vela origen debe ser roja)
+                    bullishOB = cierres[idx_ob] < aperturas[idx_ob]
+                    
+                    # 2. Las siguientes 5 velas deben ser alcistas (verdes) consecutivas
+                    upcandles = 0
+                    for i in range(-5, 0): # Revisa las posiciones -5, -4, -3, -2, -1
+                        if cierres[i] > aperturas[i]:
+                            upcandles += 1
+                    
+                    # 3. Movimiento de porcentaje mínimo (Threshold = 0.5%)
+                    absmove = (abs(cierres[idx_ob] - precio_actual) / cierres[idx_ob]) * 100
+                    relmove = absmove >= 0.5
+                    
+                    # === DISPARO DEL GATILLO DE COMPRA ===
+                    if bullishOB and (upcandles == 5) and relmove and por_encima_ema:
+                        # Sacamos el mínimo de la vela del bloque de órdenes (Índice 3 en Binance es el Low)
+                        stop_loss = float(datos[idx_ob][3])
                         
-                        # Control de seguridad: Si el mínimo está muy lejos, usamos un margen estándar de $150
-                        if (precio_actual - stop_loss) > 500 or stop_loss >= precio_actual:
-                            stop_loss = precio_actual - 150.00
+                        # Margen de seguridad si el stop queda demasiado ajustado
+                        if stop_loss >= precio_actual or (precio_actual - stop_loss) > 600:
+                            stop_loss = precio_actual - 200.00
                             
-                        # El Take Profit busca el doble de beneficio que lo que arriesga el Stop Loss (Ratio 1:2)
                         distancia_riesgo = precio_actual - stop_loss
-                        take_profit = precio_actual + (distancia_riesgo * 2)
+                        take_profit = precio_actual + (distancia_riesgo * 2) # Ratio 1:2
                         
                         mensaje_alert = (
                             f"🦈 *CLUB MARKETSHARKS ALERTA EN VIVO*\n\n"
@@ -112,18 +107,18 @@ def motor_de_trading():
                             f"💵 *Precio Entrada:* $ {precio_actual:,.2f} USD\n"
                             f"🛡️ *Stop Loss (SL):* $ {stop_loss:,.2f} USD\n"
                             f"💰 *Take Profit (TP):* $ {take_profit:,.2f} USD\n"
-                            f"⚙️ *Apalancamiento:* 10x - 20x (Recomendado)\n\n"
+                            f"⚙️ *Apalancamiento:* 50x (Mínimo recomendado)\n\n"
                             f"📈 *Filtro Trend:* Operación por encima de EMA 200 ($ {ema_200:,.2f})"
                         )
                         enviar_senal_telegram(mensaje_alert)
-                        time.sleep(900)  # Si hay señal, espera 15 min a que cierre la vela
+                        time.sleep(900)  # Pausa de 15 minutos para que cierre la vela actual y no repita la señal
                         continue
 
-            print("🔍 Escaneo completado. Mercado estable. Próximo análisis en 60 segundos...")
+            print("🔍 Escaneo completado. Sin novedades en los Order Blocks. Reintentando en 60 segundos...")
             time.sleep(60)  
             
         except Exception as e:
-            print(f"⚠️ Error en el bucle de trading: {e}")
+            print(f"⚠️ Error en el motor de trading: {e}")
             time.sleep(30)
 
 if __name__ == '__main__':
