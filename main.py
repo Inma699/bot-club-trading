@@ -11,27 +11,34 @@ def home():
     return "Club MarketSharks - Algoritmo Espejo TradingView Activo", 200
 
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
-TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID")
+TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 def enviar_senal_telegram(mensaje):
     if not TOKEN_TELEGRAM or not CHAT_ID_CANAL:
+        print("⚠️ Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Render")
         return
-    url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
+
+    url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
     payload = {"chat_id": CHAT_ID_CANAL, "text": mensaje, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=10)
-    except:
-        pass
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        print("✅ Señal enviada a Telegram")
+    except Exception as e:
+        print(f"⚠️ Error enviando señal a Telegram: {e}")
+
 
 def obtener_datos_binance():
-    url = "https://binance.com"
+    url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": "BTCUSDT", "interval": "15m", "limit": 210}
     try:
         response = requests.get(url, params=params, timeout=10)
         if response.status_code == 200:
             return response.json()
-    except:
+        print(f"⚠️ Binance devolvió estado {response.status_code}: {response.text[:200]}")
+    except Exception as e:
+        print(f"⚠️ Error consultando Binance: {e}")
         return None
 
 def calcular_ema_tradingview(precios_cierre, periodo=200):
