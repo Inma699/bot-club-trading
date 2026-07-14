@@ -18,7 +18,6 @@ def enviar_senal_telegram(mensaje):
     if not TOKEN_TELEGRAM or not CHAT_ID_CANAL:
         print("❌ Error: Faltan las variables en el panel de Render.")
         return
-    # CORRECCIÓN DE LA URL: Añadida la estructura /bot/ oficial de Telegram
     url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
     payload = {"chat_id": CHAT_ID_CANAL, "text": mensaje, "parse_mode": "Markdown"}
     try:
@@ -71,7 +70,7 @@ def motor_de_trading():
             try:
                 datos = obtener_datos_binance(par, temporalidad)
                 if datos:
-                    # En la API de Binance: vela[1]=Open, vela[2]=High, vela[3]=Low, vela[4]=Close
+                    # CORRECCIÓN DE ÍNDICES: Extraemos las columnas nativas de Binance de forma numérica
                     aperturas = [float(vela[1]) for vela in datos]
                     altos     = [float(vela[2]) for vela in datos]
                     bajos     = [float(vela[3]) for vela in datos]
@@ -90,7 +89,7 @@ def motor_de_trading():
                     upcandles = sum(1 for i in range(-5, 0) if cierres[i] > aperturas[i])
                     
                     if bullishOB and (upcandles == 5) and relmove:
-                        stop_loss = float(datos[idx_ob][3]) # Low de la vela de origen [3]
+                        stop_loss = float(datos[idx_ob][3]) # Índice 3 es el Low en Binance
                         if stop_loss >= precio_actual: stop_loss = precio_actual - 150.00
                         take_profit = precio_actual + ((precio_actual - stop_loss) * 2)
                         
@@ -114,7 +113,7 @@ def motor_de_trading():
                     downcandles = sum(1 for i in range(-5, 0) if cierres[i] < aperturas[i])
                     
                     if bearishOB and (downcandles == 5) and relmove:
-                        stop_loss = float(datos[idx_ob][2]) # High de la vela de origen [2]
+                        stop_loss = float(datos[idx_ob][2]) # Índice 2 es el High en Binance
                         if stop_loss <= precio_actual: stop_loss = precio_actual + 150.00
                         take_profit = precio_actual - ((stop_loss - precio_actual) * 2)
                         
