@@ -449,11 +449,21 @@ def enviar_senal_y_registrar(senal, chat_id=None):
 
 def enviar_boton_solicitud(chat_id=None):
     markup = {"inline_keyboard": [[{"text": "Solicitar señal ahora", "callback_data": "senal_ahora"}]]}
-    mensaje = "🦈 *CLUB MARKETSHARKS*\n\nPulse el botón para solicitar una señal instantánea con dirección, SL, TP y apalancamiento recomendado."
+    mensaje = (
+        "🦈 *CLUB MARKETSHARKS*\n\n"
+        "Pulse el botón para solicitar una señal instantánea con dirección, SL, TP y apalancamiento recomendado.\n\n"
+        "Si el botón no responde, escribe /senalahora en este chat para pedirla manualmente."
+    )
     enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=markup)
 
 
 def generar_senal_manual(chat_id=None):
+    if chat_id:
+        mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEl bot está estudiando la mejor señal para ti. Recibirás la señal en 1 minuto."
+        enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
+
+    time.sleep(60)
+
     hora_actual = hora_espana()
     for mercado in CONFIGURACIONES_MERCADO:
         senal = generar_senal_para_mercado(mercado, hora_actual, tipo="manual")
@@ -484,7 +494,7 @@ def telegram_listener():
                     message = update["message"]
                     chat_id = message.get("chat", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
-                    if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal"}:
+                    if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal", "!senal", "!senalahora"}:
                         generar_senal_manual(chat_id=chat_id)
                 if "callback_query" in update:
                     callback = update["callback_query"]
