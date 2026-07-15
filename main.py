@@ -42,6 +42,17 @@ ESTADO_DIARIO = {
     "minimo_senales_alcanzado": False,
 }
 
+# === CONTROL DE SOLICITUDES MANUALES ===
+SOLICITUDES_MANUALES = {}
+
+
+def limpiar_solicitudes_si_es_necesario():
+    global SOLICITUDES_MANUALES
+    hoy = hora_espana().strftime("%Y-%m-%d")
+    for chat_id in list(SOLICITUDES_MANUALES.keys()):
+        if SOLICITUDES_MANUALES[chat_id].get("fecha") != hoy:
+            del SOLICITUDES_MANUALES[chat_id]
+
 
 def hora_espana():
     return datetime.now(ZoneInfo("Europe/Madrid"))
@@ -322,12 +333,14 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
     flujo_texto = f"\n⚡ *Flujo de capital:* {flujo_btc['direccion']} ({flujo_btc['confianza']:.2f}) | {flujo_btc['motivo']}" if flujo_btc else ""
     liquidacion_texto = f"\n💥 *Liquidaciones/impulso masivo:* {liquidaciones['intensidad']} | {liquidaciones['motivo']}" if liquidaciones and liquidaciones.get("detectado") else ""
     prefijo = "🦈 *SEÑAL MANUAL*" if tipo == "manual" else "🦈 *CLUB MARKETSHARKS ALERTA EN VIVO*"
+    tipo_texto = "\n⚠️ *Esta señal fue solicitada manualmente por un miembro y no forma parte de la detección automática principal.*" if tipo == "manual" else ""
     if direccion == "COMPRA":
         direccion_texto = "🟢 *Dirección:* COMPRA"
     else:
         direccion_texto = "🔴 *Dirección:* VENTA"
     return (
         f"{prefijo}\n\n"
+        f"{tipo_texto}\n"
         f"📊 *Par:* {mercado['nombre']}\n"
         f"🎯 *Estrategia:* Order Block + Flujo de capital + EMA 200\n"
         f"{direccion_texto}\n\n"
@@ -472,9 +485,22 @@ def enviar_boton_solicitud(chat_id=None):
 
 
 def generar_senal_manual(chat_id=None):
-    if chat_id:
-        mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEl bot está estudiando la mejor señal para ti. Recibirás la señal en 1 minuto."
-        enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
+    global SOLICITUDES_MANUALES
+    limpiar_solicitudes_si_es_necesario()
+    if not chat_id:
+        return False
+
+    hoy = hora_espana().strftime("%Y-%m-%d")
+    estado = SOLICITUDES_MANUALES.get(chat_id)
+    if estado and estado.get("fecha") == hoy and estado.get("usado"):
+        mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
+        enviar_senal_telegram(mensaje, chat_id=chat_id)
+        return False
+
+    SOLICITUDES_MANUALES[chat_id] = {"fecha": hoy, "usado": True}
+
+    mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEl bot está estudiando la mejor señal para ti. Recibirás la señal en 1 minuto."
+    enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
 
     time.sleep(60)
 
@@ -484,6 +510,8 @@ def generar_senal_manual(chat_id=None):
         if senal:
             enviar_senal_y_registrar(senal, chat_id=chat_id)
             return True
+    mensaje_error = "⚠️ *CLUB MARKETSHARKS*\n\nNo se pudo generar una señal en este momento. Inténtalo de nuevo más tarde."
+    enviar_senal_telegram(mensaje_error, chat_id=chat_id)
     return False
 
 
@@ -534,17 +562,18 @@ def motor_de_trading():
     while True:
         try:
             resetear_estado_diario_si_es_necesario()
+            limpiar_solicitudes_si_es_necesario()
             hora_actual = hora_espana()
             senal_enviada = False
 
+            # El motor automático ya no envía señales cada minuto de forma indiscriminada.
+            # Solo generará una señal automática si hay un contexto claro y se limita a una por ciclo.
             for mercado in CONFIGURACIONES_MERCADO:
+                if senal_enviada:
+                    break
                 senal = generar_senal_para_mercado(mercado, hora_actual, tipo="auto")
                 if not senal:
                     continue
-                if senal["direccion"] == "COMPRA" and (senal["precio_actual"] > senal["ema_200"]):
-                    pass
-                elif senal["direccion"] == "VENTA" and (senal["precio_actual"] < senal["ema_200"]):
-                    pass
 
                 if senal["direccion"] == "COMPRA" and senal["precio_actual"] > senal["ema_200"]:
                     enviar_senal_y_registrar(senal)
