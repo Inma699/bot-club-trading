@@ -39,7 +39,10 @@ OPERACIONES_ABIERTAS = []
 ESTADO_DIARIO = {
     "fecha": None,
     "senales_hoy": 0,
+    "senales_automaticas_hoy": 0,
+    "senales_manuales_hoy": 0,
     "minimo_senales_alcanzado": False,
+    "minimo_senales_automaticas_alcanzado": False,
 }
 
 # === CONTROL DE SOLICITUDES MANUALES ===
@@ -86,7 +89,10 @@ def resetear_estado_diario_si_es_necesario():
     if ESTADO_DIARIO["fecha"] != hoy:
         ESTADO_DIARIO["fecha"] = hoy
         ESTADO_DIARIO["senales_hoy"] = 0
+        ESTADO_DIARIO["senales_automaticas_hoy"] = 0
+        ESTADO_DIARIO["senales_manuales_hoy"] = 0
         ESTADO_DIARIO["minimo_senales_alcanzado"] = False
+        ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] = False
 
 
 def evaluar_noticias_alto_impacto(hora_actual):
@@ -478,8 +484,13 @@ def registrar_senal_emitida(mercado, direccion, precio_actual, stop_loss, take_p
     else:
         ESTADISTICAS["ventas"] += 1
     ESTADO_DIARIO["senales_hoy"] += 1
-    if ESTADO_DIARIO["senales_hoy"] >= 2:
-        ESTADO_DIARIO["minimo_senales_alcanzado"] = True
+    if tipo == "auto":
+        ESTADO_DIARIO["senales_automaticas_hoy"] += 1
+        if ESTADO_DIARIO["senales_automaticas_hoy"] >= 2:
+            ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] = True
+            ESTADO_DIARIO["minimo_senales_alcanzado"] = True
+    else:
+        ESTADO_DIARIO["senales_manuales_hoy"] += 1
     OPERACIONES_ABIERTAS.append({
         "mercado": mercado["nombre"],
         "tipo": direccion,
@@ -503,6 +514,9 @@ def enviar_boton_solicitud(chat_id=None):
     mensaje = (
         "🦈 *CLUB MARKETSHARKS*\n\n"
         "Pulse el botón para solicitar una señal instantánea con dirección, SL, TP y apalancamiento recomendado.\n\n"
+        "⚠️ Aviso importante: esta señal manual NO sustituye la estrategia principal del canal.\n"
+        "Cada miembro del canal privado solo puede solicitar 1 señal manual por día.\n"
+        "La señal manual se asume bajo su propio riesgo y no tiene por qué coincidir con la estrategia principal del bot.\n\n"
         "Si el botón no responde, escribe /senalahora en este chat para pedirla manualmente."
     )
     enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=markup)
@@ -620,9 +634,9 @@ def motor_de_trading():
                     senal_enviada = True
                     time.sleep(2)
 
-            if not ESTADO_DIARIO["minimo_senales_alcanzado"] and hora_actual.hour >= 14:
+            if not ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] and hora_actual.hour >= 14:
                 for mercado in CONFIGURACIONES_MERCADO:
-                    if ESTADO_DIARIO["senales_hoy"] >= 2:
+                    if ESTADO_DIARIO["senales_automaticas_hoy"] >= 2:
                         break
                     senal = generar_senal_para_mercado(mercado, hora_actual, tipo="auto")
                     if senal:
@@ -655,4 +669,3 @@ if __name__ == '__main__':
 
     puerto = int(os.getenv("PORT", 10000))
     app.run(host='0.0.0.0', port=puerto)
-
