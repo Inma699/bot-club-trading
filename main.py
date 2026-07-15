@@ -76,52 +76,66 @@ def evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos):
 
 
 def obtener_datos_binance(symbol, interval, limit=210):
-    url = "https://api.binance.com/api/v3/klines"
+    urls = [
+        ("https://api.binance.com/api/v3/klines", {}),
+        ("https://api.binance.us/api/v3/klines", {}),
+    ]
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        print(f"⚠️ Binance devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
-    except Exception as e:
-        print(f"⚠️ Error consultando Binance para {symbol} {interval}: {e}")
+    for url, extra_params in urls:
+        try:
+            response = requests.get(url, params={**params, **extra_params}, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            print(f"⚠️ {url} devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
+        except Exception as e:
+            print(f"⚠️ Error consultando {url} para {symbol} {interval}: {e}")
     return None
 
 
 def obtener_datos_binance_futuros(symbol, interval, limit=210):
-    url = "https://fapi.binance.com/fapi/v1/klines"
+    urls = [
+        ("https://fapi.binance.com/fapi/v1/klines", {}),
+        ("https://fstream.binance.com/fapi/v1/klines", {}),
+    ]
     params = {"symbol": symbol, "interval": interval, "limit": limit}
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        print(f"⚠️ Binance Futures devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
-    except Exception as e:
-        print(f"⚠️ Error consultando Binance Futures para {symbol} {interval}: {e}")
+    for url, extra_params in urls:
+        try:
+            response = requests.get(url, params={**params, **extra_params}, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            print(f"⚠️ {url} devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
+        except Exception as e:
+            print(f"⚠️ Error consultando {url} para {symbol} {interval}: {e}")
     return None
 
 
 def obtener_ticker_24h(symbol):
-    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-    params = {"symbol": symbol}
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-    except Exception as e:
-        print(f"⚠️ Error consultando ticker 24h: {e}")
+    urls = [
+        ("https://fapi.binance.com/fapi/v1/ticker/24hr", {"symbol": symbol}),
+        ("https://api.binance.us/fapi/v1/ticker/24hr", {"symbol": symbol}),
+    ]
+    for url, params in urls:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ Error consultando ticker 24h en {url}: {e}")
     return None
 
 
 def obtener_funding_rate(symbol):
-    url = "https://fapi.binance.com/fapi/v1/fundingRate"
-    params = {"symbol": symbol, "limit": 2}
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-    except Exception as e:
-        print(f"⚠️ Error consultando funding rate: {e}")
+    urls = [
+        ("https://fapi.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
+        ("https://fstream.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
+    ]
+    for url, params in urls:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ Error consultando funding rate en {url}: {e}")
     return None
 
 
