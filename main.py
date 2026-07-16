@@ -413,6 +413,69 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
     )
 
 
+def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
+    intervalos = [mercado.get("interval", "15m")]
+    if mercado.get("symbol") == "SPXUSDT":
+        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"])
+
+    for interval in intervalos:
+        datos = obtener_datos_binance(mercado["symbol"], interval)
+        if not datos:
+            continue
+
+        cierres = [float(vela[4]) for vela in datos]
+        aperturas = [float(vela[1]) for vela in datos]
+        altos = [float(vela[2]) for vela in datos]
+        bajos = [float(vela[3]) for vela in datos]
+        volumenes = [float(vela[5]) for vela in datos]
+        precio_actual = cierres[-1]
+        ema_200 = calcular_ema_tradingview(cierres, 200)
+        if not ema_200:
+            continue
+
+        fuerzas, detalle = evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos)
+        cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100 if len(cierres) >= 2 else 0.0
+        cambio_3 = ((cierres[-1] - cierres[-3]) / cierres[-3]) * 100 if len(cierres) >= 3 else 0.0
+
+        if precio_actual > ema_200 and (cambio_1 >= -0.1 or cambio_3 >= -0.2):
+            direccion = "COMPRA"
+            stop_loss = min(bajos[-3:]) if len(bajos) >= 3 else precio_actual - 1.0
+            distancia_riesgo = max(precio_actual - stop_loss, 1.0)
+            take_profit = precio_actual + (distancia_riesgo * 2)
+        else:
+            direccion = "VENTA"
+            stop_loss = max(altos[-3:]) if len(altos) >= 3 else precio_actual + 1.0
+            distancia_riesgo = max(stop_loss - precio_actual, 1.0)
+            take_profit = precio_actual - (distancia_riesgo * 2)
+
+        motivo = f"Señal manual de respaldo | cambio_1 {cambio_1:.2f}% | EMA 200 {ema_200:.2f}"
+        mensaje = construir_mensaje_senal(
+            mercado=mercado,
+            direccion=direccion,
+            precio_actual=precio_actual,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            ema_200=ema_200,
+            fuerza=max(fuerzas, 0.0),
+            motivo=motivo,
+            flujo_btc=None,
+            liquidaciones=None,
+            tipo=tipo,
+        )
+        return {
+            "mercado": mercado,
+            "direccion": direccion,
+            "precio_actual": precio_actual,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "ema_200": ema_200,
+            "mensaje": mensaje,
+            "apalancamiento": 20 if mercado["symbol"] == "BTCUSDT" else 10,
+            "interval": interval,
+        }
+    return None
+
+
 def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
     intervalos = [mercado.get("interval", "15m")]
     if mercado.get("symbol") == "SPXUSDT":
@@ -581,10 +644,8 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None):
             return False
         SOLICITUDES_MANUALES[chat_id] = {"fecha": hoy, "usado": True}
 
-    mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEl bot está estudiando la mejor señal para ti. Recibirás la señal en 1 minuto."
+    mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEstoy preparando la señal manual para ti. Enseguida te la comparto."
     enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
-
-    time.sleep(60)
 
     hora_actual = hora_espana()
     mercados = CONFIGURACIONES_MERCADO
@@ -595,9 +656,18 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None):
 
     for mercado in mercados:
         senal = generar_senal_para_mercado(mercado, hora_actual, tipo="manual")
+        if not senal:
+            senal = generar_senal_fallback(mercado, hora_actual, tipo="manual")
         if senal:
             enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
             return True
+
+    for mercado in CONFIGURACIONES_MERCADO:
+        senal = generar_senal_fallback(mercado, hora_actual, tipo="manual")
+        if senal:
+            enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
+            return True
+
     mensaje_error = "⚠️ *CLUB MARKETSHARKS*\n\nNo se pudo generar una señal en este momento. Inténtalo de nuevo más tarde."
     enviar_senal_telegram(mensaje_error, chat_id=chat_id)
     return False
