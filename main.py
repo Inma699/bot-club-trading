@@ -50,6 +50,23 @@ SOLICITUDES_MANUALES = {}
 ADMINS_CANAL = set()
 
 
+def cargar_admins_del_canal():
+    global ADMINS_CANAL
+    raw_ids = os.getenv("TELEGRAM_ADMIN_IDS", os.getenv("ADMINS_CANAL_IDS", os.getenv("ADMINS_CANAL", ""))).strip()
+    ids = set()
+    if raw_ids:
+        for parte in raw_ids.replace(";", ",").split(","):
+            valor = parte.strip()
+            if valor:
+                ids.add(valor)
+    if CHAT_ID_CANAL:
+        ids.add(CHAT_ID_CANAL)
+    ADMINS_CANAL = {str(item) for item in ids}
+
+
+cargar_admins_del_canal()
+
+
 def es_admin_del_canal(chat_id=None):
     if not chat_id:
         return False
@@ -629,20 +646,21 @@ def enviar_boton_solicitud(chat_id=None):
     enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=markup)
 
 
-def generar_senal_manual(chat_id=None, mercado_seleccionado=None):
+def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=None):
     global SOLICITUDES_MANUALES
     limpiar_solicitudes_si_es_necesario()
     if not chat_id:
         return False
 
     hoy = hora_espana().strftime("%Y-%m-%d")
-    if not es_admin_del_canal(chat_id):
-        estado = SOLICITUDES_MANUALES.get(chat_id)
+    identificador = requester_id or chat_id
+    if not es_admin_del_canal(identificador):
+        estado = SOLICITUDES_MANUALES.get(identificador)
         if estado and estado.get("fecha") == hoy and estado.get("usado"):
             mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
             enviar_senal_telegram(mensaje, chat_id=chat_id)
             return False
-        SOLICITUDES_MANUALES[chat_id] = {"fecha": hoy, "usado": True}
+        SOLICITUDES_MANUALES[identificador] = {"fecha": hoy, "usado": True}
 
     mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEstoy preparando la señal manual para ti. Enseguida te la comparto."
     enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
@@ -693,25 +711,27 @@ def telegram_listener():
                 if "message" in update:
                     message = update["message"]
                     chat_id = message.get("chat", {}).get("id")
+                    user_id = message.get("from", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
                     if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal", "!senal", "!senalahora"}:
-                        generar_senal_manual(chat_id=chat_id)
+                        generar_senal_manual(chat_id=chat_id, requester_id=user_id)
                     if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc")
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
                     if text in {"/senalspx", "/senalspx", "senalspx", "spxmanual"}:
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx")
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
                 if "callback_query" in update:
                     callback = update["callback_query"]
                     chat_id = callback.get("message", {}).get("chat", {}).get("id")
+                    user_id = callback.get("from", {}).get("id")
                     data = callback.get("data", "")
                     if data == "senal_btc":
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc")
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
                     if data == "senal_spx":
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPX..."}, timeout=10)
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx")
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
