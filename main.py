@@ -19,7 +19,7 @@ CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
     {"symbol": "BTCUSDT", "interval": "15m", "nombre": "BTCUSDT (15m)"},
-    {"symbol": "SPXCUSDT", "interval": "1h", "nombre": "SPXCUSDT (1h)"},
+    {"symbol": "SPXUSDT", "interval": "15m", "nombre": "SPXUSDT (15m/1h)", "fallback_intervals": ["1h"], "aliases": ["SPXUSDT"]},
 ]
 
 # === ESTADÍSTICAS DIARIAS ===
@@ -49,8 +49,8 @@ ESTADO_DIARIO = {
 SOLICITUDES_MANUALES = {}
 
 # === CONTROL DE SEÑALES AUTOMÁTICAS ===
-AUTO_SIGNAL_ENABLED_VALUE = os.getenv("AUTO_SIGNAL_ENABLED")
-AUTO_SIGNAL_ENABLED = False if AUTO_SIGNAL_ENABLED_VALUE is None else AUTO_SIGNAL_ENABLED_VALUE.lower() in {"1", "true", "yes", "on"}
+AUTO_SIGNAL_ENABLED_VALUE = os.getenv("AUTO_SIGNAL_ENABLED", "true")
+AUTO_SIGNAL_ENABLED = AUTO_SIGNAL_ENABLED_VALUE.lower() in {"1", "true", "yes", "on"}
 AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
 ULTIMA_SENAL_AUTOMATICA = None
 DETENER_BOT = threading.Event()
@@ -62,10 +62,12 @@ def stop_bot():
     return "Bot detenido", 200
 
 
-def puede_enviar_senal_automatica():
+def puede_enviar_senal_automatica(forzar=False):
     global ULTIMA_SENAL_AUTOMATICA
     if not AUTO_SIGNAL_ENABLED:
         return False
+    if forzar:
+        return True
     if ULTIMA_SENAL_AUTOMATICA is None:
         return True
     return (time.time() - ULTIMA_SENAL_AUTOMATICA["timestamp"]) >= AUTO_SIGNAL_COOLDOWN_SECONDS
@@ -114,20 +116,43 @@ def evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos):
     return fuerza, {"cambio_1": cambio_1, "cambio_3": cambio_3, "rango_3": rango_3}
 
 
+def evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_actual, ema_200):
+    if len(cierres) < 5:
+        return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Datos insuficientes"}
+
+    cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100
+    cambio_3 = ((cierres[-1] - cierres[-3]) / cierres[-3]) * 100
+    volumen_actual = volumenes[-1]
+    volumen_promedio = sum(volumenes[-3:]) / max(1, len(volumenes[-3:]))
+    spike_volumen = volumen_actual / max(volumen_promedio, 1)
+    impulso_alza = cambio_1 >= 0.4 and cambio_3 >= 0.4 and spike_volumen >= 1.4 and precio_actual > ema_200
+    impulso_baja = cambio_1 <= -0.4 and cambio_3 <= -0.4 and spike_volumen >= 1.4 and precio_actual < ema_200
+
+    if impulso_alza:
+        return {"detectado": True, "direccion": "COMPRA", "motivo": f"Impulso fuerte al alza: cambio_1 {cambio_1:.2f}% | volumen {spike_volumen:.2f}x"}
+    if impulso_baja:
+        return {"detectado": True, "direccion": "VENTA", "motivo": f"Impulso fuerte a la baja: cambio_1 {cambio_1:.2f}% | volumen {spike_volumen:.2f}x"}
+    return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Sin impulso fuerte"}
+
+
 def obtener_datos_binance(symbol, interval, limit=210):
     urls = [
         ("https://api.binance.com/api/v3/klines", {}),
         ("https://api.binance.us/api/v3/klines", {}),
     ]
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    for url, extra_params in urls:
-        try:
-            response = requests.get(url, params={**params, **extra_params}, timeout=10)
-            if response.status_code == 200:
-                return response.json()
-            print(f"⚠️ {url} devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
-        except Exception as e:
-            print(f"⚠️ Error consultando {url} para {symbol} {interval}: {e}")
+    symbols = [symbol]
+    if symbol == "SPXUSDT":
+        symbols.extend(["SPXUSDT"])
+    for candidate_symbol in symbols:
+        params = {"symbol": candidate_symbol, "interval": interval, "limit": limit}
+        for url, extra_params in urls:
+            try:
+                response = requests.get(url, params={**params, **extra_params}, timeout=10)
+                if response.status_code == 200:
+                    return response.json()
+                print(f"⚠️ {url} devolvió estado {response.status_code} para {candidate_symbol} {interval}: {response.text[:200]}")
+            except Exception as e:
+                print(f"⚠️ Error consultando {url} para {candidate_symbol} {interval}: {e}")
     return None
 
 
@@ -382,98 +407,106 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
 
 
 def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
-    datos = obtener_datos_binance(mercado["symbol"], mercado["interval"])
-    if not datos:
-        return None
+    intervalos = [mercado.get("interval", "15m")]
+    if mercado.get("symbol") == "SPXUSDT":
+        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"])
 
-    aperturas = [float(vela[1]) for vela in datos]
-    altos = [float(vela[2]) for vela in datos]
-    bajos = [float(vela[3]) for vela in datos]
-    cierres = [float(vela[4]) for vela in datos]
-    volumenes = [float(vela[5]) for vela in datos]
-    precio_actual = cierres[-1]
-    ema_200 = calcular_ema_tradingview(cierres, 200)
-    if not ema_200:
-        return None
+    for interval in intervalos:
+        datos = obtener_datos_binance(mercado["symbol"], interval)
+        if not datos:
+            continue
 
-    idx_ob = -6
-    vela_ob = datos[idx_ob]
-    apertura_ob = float(vela_ob[1])
-    cierre_ob = float(vela_ob[4])
-    low_ob = float(vela_ob[3])
-    high_ob = float(vela_ob[2])
+        aperturas = [float(vela[1]) for vela in datos]
+        altos = [float(vela[2]) for vela in datos]
+        bajos = [float(vela[3]) for vela in datos]
+        cierres = [float(vela[4]) for vela in datos]
+        volumenes = [float(vela[5]) for vela in datos]
+        precio_actual = cierres[-1]
+        ema_200 = calcular_ema_tradingview(cierres, 200)
+        if not ema_200:
+            continue
 
-    fuerza, detalle = evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos)
-    nivel_noticias, motivo = evaluar_noticias_alto_impacto(hora_actual)
-    umbral_fuerza = 1.6 if nivel_noticias == "alto" else 0.8
+        idx_ob = -6
+        vela_ob = datos[idx_ob]
+        apertura_ob = float(vela_ob[1])
+        cierre_ob = float(vela_ob[4])
+        low_ob = float(vela_ob[3])
+        high_ob = float(vela_ob[2])
 
-    flujo_btc = None
-    liquidaciones = None
-    if mercado["symbol"] == "BTCUSDT":
-        datos_futuros = obtener_datos_binance_futuros(mercado["symbol"], mercado["interval"], 210)
-        ticker_24h = obtener_ticker_24h(mercado["symbol"])
-        funding_rate = obtener_funding_rate(mercado["symbol"])
-        if datos_futuros:
-            cierres_futuros = [float(vela[4]) for vela in datos_futuros]
-            volumenes_futuros = [float(vela[5]) for vela in datos_futuros]
-            flujo_btc = evaluar_flujo_capital(precio_actual, ema_200, cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
-            liquidaciones = detectar_liquidaciones_masivas(cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
+        fuerza, detalle = evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos)
+        impulso_fuerte = evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_actual, ema_200)
+        nivel_noticias, motivo = evaluar_noticias_alto_impacto(hora_actual)
+        umbral_fuerza = 1.6 if nivel_noticias == "alto" else 0.8
 
-    bullish_ob = cierre_ob < apertura_ob
-    bearish_ob = cierre_ob > apertura_ob
-    ultimas_5 = list(range(-5, 0))
-    bullish_sequence = all(cierres[i] > aperturas[i] for i in ultimas_5)
-    bearish_sequence = all(cierres[i] < aperturas[i] for i in ultimas_5)
-    absmove = (abs(cierre_ob - precio_actual) / cierre_ob) * 100
-    relmove = absmove >= 0.5
+        flujo_btc = None
+        liquidaciones = None
+        if mercado["symbol"] == "BTCUSDT":
+            datos_futuros = obtener_datos_binance_futuros(mercado["symbol"], interval, 210)
+            ticker_24h = obtener_ticker_24h(mercado["symbol"])
+            funding_rate = obtener_funding_rate(mercado["symbol"])
+            if datos_futuros:
+                cierres_futuros = [float(vela[4]) for vela in datos_futuros]
+                volumenes_futuros = [float(vela[5]) for vela in datos_futuros]
+                flujo_btc = evaluar_flujo_capital(precio_actual, ema_200, cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
+                liquidaciones = detectar_liquidaciones_masivas(cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
 
-    condicion_compra = (
-        (bullish_ob and bullish_sequence and relmove and precio_actual > ema_200 and fuerza >= umbral_fuerza)
-        or (precio_actual > ema_200 and flujo_btc and flujo_btc["direccion"] == "COMPRA" and flujo_btc["confianza"] >= 1.5)
-    )
-    condicion_venta = (
-        (bearish_ob and bearish_sequence and relmove and precio_actual < ema_200 and fuerza >= umbral_fuerza)
-        or (precio_actual < ema_200 and flujo_btc and flujo_btc["direccion"] == "VENTA" and flujo_btc["confianza"] >= 1.5)
-    )
+        bullish_ob = cierre_ob < apertura_ob
+        bearish_ob = cierre_ob > apertura_ob
+        ultimas_5 = list(range(-5, 0))
+        bullish_sequence = all(cierres[i] > aperturas[i] for i in ultimas_5)
+        bearish_sequence = all(cierres[i] < aperturas[i] for i in ultimas_5)
+        absmove = (abs(cierre_ob - precio_actual) / cierre_ob) * 100
+        relmove = absmove >= 0.5
 
-    if condicion_compra:
-        direccion = "COMPRA"
-        stop_loss = low_ob if low_ob < precio_actual else precio_actual - 200.0
-        distancia_riesgo = precio_actual - stop_loss
-        take_profit = precio_actual + (distancia_riesgo * 2)
-    elif condicion_venta:
-        direccion = "VENTA"
-        stop_loss = high_ob if high_ob > precio_actual else precio_actual + 200.0
-        distancia_riesgo = stop_loss - precio_actual
-        take_profit = precio_actual - (distancia_riesgo * 2)
-    else:
-        direccion = "COMPRA" if precio_actual > ema_200 else "VENTA"
-        stop_loss = precio_actual - 200.0 if direccion == "COMPRA" else precio_actual + 200.0
-        take_profit = precio_actual + 400.0 if direccion == "COMPRA" else precio_actual - 400.0
+        condicion_compra = (
+            (bullish_ob and bullish_sequence and relmove and precio_actual > ema_200 and fuerza >= umbral_fuerza)
+            or (precio_actual > ema_200 and flujo_btc and flujo_btc["direccion"] == "COMPRA" and flujo_btc["confianza"] >= 1.5)
+            or (impulso_fuerte["detectado"] and impulso_fuerte["direccion"] == "COMPRA")
+        )
+        condicion_venta = (
+            (bearish_ob and bearish_sequence and relmove and precio_actual < ema_200 and fuerza >= umbral_fuerza)
+            or (precio_actual < ema_200 and flujo_btc and flujo_btc["direccion"] == "VENTA" and flujo_btc["confianza"] >= 1.5)
+            or (impulso_fuerte["detectado"] and impulso_fuerte["direccion"] == "VENTA")
+        )
 
-    mensaje = construir_mensaje_senal(
-        mercado=mercado,
-        direccion=direccion,
-        precio_actual=precio_actual,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        ema_200=ema_200,
-        fuerza=fuerza,
-        motivo=motivo,
-        flujo_btc=flujo_btc,
-        liquidaciones=liquidaciones,
-        tipo=tipo,
-    )
-    return {
-        "mercado": mercado,
-        "direccion": direccion,
-        "precio_actual": precio_actual,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "ema_200": ema_200,
-        "mensaje": mensaje,
-        "apalancamiento": 20 if mercado["symbol"] == "BTCUSDT" else 10,
-    }
+        if condicion_compra:
+            direccion = "COMPRA"
+            stop_loss = low_ob if low_ob < precio_actual else precio_actual - 200.0
+            distancia_riesgo = precio_actual - stop_loss
+            take_profit = precio_actual + (distancia_riesgo * 2)
+        elif condicion_venta:
+            direccion = "VENTA"
+            stop_loss = high_ob if high_ob > precio_actual else precio_actual + 200.0
+            distancia_riesgo = stop_loss - precio_actual
+            take_profit = precio_actual - (distancia_riesgo * 2)
+        else:
+            continue
+
+        mensaje = construir_mensaje_senal(
+            mercado=mercado,
+            direccion=direccion,
+            precio_actual=precio_actual,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            ema_200=ema_200,
+            fuerza=fuerza,
+            motivo=motivo,
+            flujo_btc=flujo_btc,
+            liquidaciones=liquidaciones,
+            tipo=tipo,
+        )
+        return {
+            "mercado": mercado,
+            "direccion": direccion,
+            "precio_actual": precio_actual,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "ema_200": ema_200,
+            "mensaje": mensaje,
+            "apalancamiento": 20 if mercado["symbol"] == "BTCUSDT" else 10,
+            "interval": interval,
+        }
+    return None
 
 
 def registrar_senal_emitida(mercado, direccion, precio_actual, stop_loss, take_profit, apalancamiento, tipo="auto"):
@@ -613,7 +646,7 @@ def motor_de_trading():
                 time.sleep(60)
                 continue
 
-            if not puede_enviar_senal_automatica():
+            if not puede_enviar_senal_automatica(forzar=not ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] and ESTADO_DIARIO["senales_automaticas_hoy"] < 2):
                 print(f"⏱️ Cooldown activo. Próxima señal automática en {AUTO_SIGNAL_COOLDOWN_SECONDS} segundos.")
                 time.sleep(60)
                 continue
