@@ -47,6 +47,13 @@ ESTADO_DIARIO = {
 
 # === CONTROL DE SOLICITUDES MANUALES ===
 SOLICITUDES_MANUALES = {}
+ADMINS_CANAL = set()
+
+
+def es_admin_del_canal(chat_id=None):
+    if not chat_id:
+        return False
+    return str(chat_id) in ADMINS_CANAL
 
 # === CONTROL DE SEÑALES AUTOMÁTICAS ===
 AUTO_SIGNAL_ENABLED_VALUE = os.getenv("AUTO_SIGNAL_ENABLED", "true")
@@ -543,32 +550,36 @@ def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
 
 
 def enviar_boton_solicitud(chat_id=None):
-    markup = {"inline_keyboard": [[{"text": "Solicitar señal ahora", "callback_data": "senal_ahora"}]]}
+    markup = {"inline_keyboard": [
+        [{"text": "BTC manual", "callback_data": "senal_btc"}],
+        [{"text": "SPX manual", "callback_data": "senal_spx"}],
+    ]}
     mensaje = (
         "🦈 *CLUB MARKETSHARKS*\n\n"
-        "Pulse el botón para solicitar una señal instantánea con dirección, SL, TP y apalancamiento recomendado.\n\n"
+        "Elija el mercado para solicitar una señal manual instantánea.\n\n"
         "⚠️ Aviso importante: esta señal manual NO sustituye la estrategia principal del canal.\n"
-        "Cada miembro del canal privado solo puede solicitar 1 señal manual por día.\n"
+        "Los administradores del canal pueden pedir más de 1 señal manual al día.\n"
+        "Los miembros normales solo pueden solicitar 1 señal manual por día.\n"
         "La señal manual se asume bajo su propio riesgo y no tiene por qué coincidir con la estrategia principal del bot.\n\n"
-        "Si el botón no responde, escribe /senalahora en este chat para pedirla manualmente."
+        "Si el botón no responde, escribe /senalbtc o /senalspx en este chat para pedirla manualmente."
     )
     enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=markup)
 
 
-def generar_senal_manual(chat_id=None):
+def generar_senal_manual(chat_id=None, mercado_seleccionado=None):
     global SOLICITUDES_MANUALES
     limpiar_solicitudes_si_es_necesario()
     if not chat_id:
         return False
 
     hoy = hora_espana().strftime("%Y-%m-%d")
-    estado = SOLICITUDES_MANUALES.get(chat_id)
-    if estado and estado.get("fecha") == hoy and estado.get("usado"):
-        mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
-        enviar_senal_telegram(mensaje, chat_id=chat_id)
-        return False
-
-    SOLICITUDES_MANUALES[chat_id] = {"fecha": hoy, "usado": True}
+    if not es_admin_del_canal(chat_id):
+        estado = SOLICITUDES_MANUALES.get(chat_id)
+        if estado and estado.get("fecha") == hoy and estado.get("usado"):
+            mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
+            enviar_senal_telegram(mensaje, chat_id=chat_id)
+            return False
+        SOLICITUDES_MANUALES[chat_id] = {"fecha": hoy, "usado": True}
 
     mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEl bot está estudiando la mejor señal para ti. Recibirás la señal en 1 minuto."
     enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
@@ -576,7 +587,13 @@ def generar_senal_manual(chat_id=None):
     time.sleep(60)
 
     hora_actual = hora_espana()
-    for mercado in CONFIGURACIONES_MERCADO:
+    mercados = CONFIGURACIONES_MERCADO
+    if mercado_seleccionado == "btc":
+        mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "BTCUSDT"]
+    elif mercado_seleccionado == "spx":
+        mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "SPXUSDT"]
+
+    for mercado in mercados:
         senal = generar_senal_para_mercado(mercado, hora_actual, tipo="manual")
         if senal:
             enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
@@ -609,14 +626,22 @@ def telegram_listener():
                     text = (message.get("text") or "").strip().lower()
                     if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal", "!senal", "!senalahora"}:
                         generar_senal_manual(chat_id=chat_id)
+                    if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc")
+                    if text in {"/senalspx", "/senalspx", "senalspx", "spxmanual"}:
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx")
                 if "callback_query" in update:
                     callback = update["callback_query"]
                     chat_id = callback.get("message", {}).get("chat", {}).get("id")
                     data = callback.get("data", "")
-                    if data == "senal_ahora":
+                    if data == "senal_btc":
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
-                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal..."}, timeout=10)
-                        generar_senal_manual(chat_id=chat_id)
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc")
+                    if data == "senal_spx":
+                        answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPX..."}, timeout=10)
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx")
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
