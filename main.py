@@ -232,11 +232,21 @@ def telegram_listener():
 
 def motor_de_trading():
     print("🚀 Iniciando motor analítico duplicador de TradingView...")
-    time.sleep(5)
+    time.sleep(8)
 
-    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Algoritmo de sincronización activado. Escaneando el mercado en vivo clonando la estrategia de TradingView para compra y venta..."
-    enviar_senal_telegram(alerta_inicio)
-    enviar_boton_solicitud(chat_id=CHAT_ID_CANAL)
+    try:
+        alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Algoritmo de sincronización activado. Escaneando el mercado en vivo clonando la estrategia de TradingView..."
+        
+        print(f"📤 Enviando mensaje de inicio al canal: {CHAT_ID_CANAL}")
+        enviar_senal_telegram(alerta_inicio)
+        
+        print("📤 Enviando botones de solicitud manual...")
+        enviar_boton_solicitud(chat_id=CHAT_ID_CANAL)
+        
+        print("✅ Mensajes de inicio enviados correctamente.")
+        
+    except Exception as e:
+        print(f"❌ Error al enviar mensajes de inicio: {e}")
 
     while True:
         try:
@@ -250,12 +260,12 @@ def motor_de_trading():
             senal_enviada = False
 
             if not AUTO_SIGNAL_ENABLED:
-                print("🛑 Señales automáticas desactivadas. Solo se atenderán solicitudes manuales.")
+                print("🛑 Señales automáticas desactivadas.")
                 time.sleep(60)
                 continue
 
             if not puede_enviar_senal_automatica(forzar=not ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] and ESTADO_DIARIO["senales_automaticas_hoy"] < 2):
-                print(f"⏱️ Cooldown activo. Próxima señal automática en {AUTO_SIGNAL_COOLDOWN_SECONDS} segundos.")
+                print(f"⏱️ Cooldown activo. Próxima señal en {AUTO_SIGNAL_COOLDOWN_SECONDS} segundos.")
                 time.sleep(60)
                 continue
 
@@ -288,25 +298,13 @@ def motor_de_trading():
             if not senal_enviada:
                 print("🔍 Escaneo completado. Sin novedades relevantes. Reintentando en 60 segundos...")
             else:
-                print("📊 Se han emitido señales. Se enviará un resumen diario al cierre del día.")
+                print("📊 Se han emitido señales.")
 
             if time.strftime("%H:%M") == "00:00" and ESTADISTICAS["ultimo_resumen"] != time.strftime("%Y-%m-%d"):
                 enviar_resumen_diario()
 
             time.sleep(60)
+
         except Exception as e:
             print(f"⚠️ Error en el motor de trading: {e}")
             time.sleep(30)
-
-
-if __name__ == '__main__':
-    hilo_trading = threading.Thread(target=motor_de_trading)
-    hilo_trading.daemon = True
-    hilo_trading.start()
-
-    hilo_listener = threading.Thread(target=telegram_listener)
-    hilo_listener.daemon = True
-    hilo_listener.start()
-
-    puerto = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=puerto)
