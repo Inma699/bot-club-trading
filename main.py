@@ -647,28 +647,18 @@ def enviar_boton_solicitud(chat_id=None):
 
 
 def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=None):
-    global SOLICITUDES_MANUALES
-    limpiar_solicitudes_si_es_necesario()
     if not chat_id:
         return False
 
-    hoy = hora_espana().strftime("%Y-%m-%d")
-    identificador = requester_id or chat_id
-    if not es_admin_del_canal(identificador):
-        estado = SOLICITUDES_MANUALES.get(identificador)
-        if estado and estado.get("fecha") == hoy and estado.get("usado"):
-            mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
-            enviar_senal_telegram(mensaje, chat_id=chat_id)
-            return False
-        SOLICITUDES_MANUALES[identificador] = {"fecha": hoy, "usado": True}
-
     hora_actual = hora_espana()
+
     mercados = CONFIGURACIONES_MERCADO
     if mercado_seleccionado == "btc":
         mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "BTCUSDT"]
     elif mercado_seleccionado == "spx":
         mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "SPXUSDT"]
 
+    # ... resto del código sin cambios ...
     for mercado in mercados:
         senal = generar_senal_para_mercado(mercado, hora_actual, tipo="manual")
         if not senal:
