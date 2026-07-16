@@ -52,15 +52,26 @@ ADMINS_CANAL = set()
 
 def cargar_admins_del_canal():
     global ADMINS_CANAL
-    raw_ids = os.getenv("TELEGRAM_ADMIN_IDS", os.getenv("ADMINS_CANAL_IDS", os.getenv("ADMINS_CANAL", ""))).strip()
-    ids = set()
+
+    raw_ids = os.getenv(
+        "TELEGRAM_ADMIN_IDS",
+        os.getenv("ADMINS_CANAL_IDS", os.getenv("ADMINS_CANAL", ""))
+    ).strip()
+
+    ids = {
+        "7143306113",  # Administrador 1
+        "1335354212",  # Administrador 2
+    }
+
     if raw_ids:
         for parte in raw_ids.replace(";", ",").split(","):
             valor = parte.strip()
             if valor:
                 ids.add(valor)
+
     if CHAT_ID_CANAL:
-        ids.add(CHAT_ID_CANAL)
+        ids.add(str(CHAT_ID_CANAL))
+
     ADMINS_CANAL = {str(item) for item in ids}
 
 
