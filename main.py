@@ -662,9 +662,6 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             return False
         SOLICITUDES_MANUALES[identificador] = {"fecha": hoy, "usado": True}
 
-    mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEstoy preparando la señal manual para ti. Enseguida te la comparto."
-    enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
-
     hora_actual = hora_espana()
     mercados = CONFIGURACIONES_MERCADO
     if mercado_seleccionado == "btc":
