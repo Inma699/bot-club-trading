@@ -49,8 +49,9 @@ def enviar_alerta_telegram(mensaje):
         print("⚠️ Telegram Error: Faltan credenciales en Render.")
         return
     try:
-        # CORRECCIÓN DE LA URL: Añadida la barra y la palabra /bot/ obligatoria
-        url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
+        # FORMATO BLINDADO: Separamos el texto de la variable para evitar errores de fusión
+        url = "https://telegram.org" + str(TOKEN_TELEGRAM) + "/sendMessage"
+        
         payload = {"chat_id": CHAT_ID_CANAL, "text": mensaje, "parse_mode": "Markdown"}
         response = requests.post(url, json=payload, timeout=10)
         
