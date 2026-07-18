@@ -46,14 +46,20 @@ PRECIO_MAXIMO_ALCANZADO = 0.0
 
 def enviar_alerta_telegram(mensaje):
     if not TOKEN_TELEGRAM or not CHAT_ID_CANAL:
-        print("⚠️ Telegram: Faltan credenciales en Render.")
+        print(f"⚠️ Telegram Error: Faltan credenciales en Render. TOKEN: '{TOKEN_TELEGRAM[:5] if TOKEN_TELEGRAM else 'VACÍO'}' | CHAT_ID: '{CHAT_ID_CANAL}'")
         return
     try:
         url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
         payload = {"chat_id": CHAT_ID_CANAL, "text": mensaje, "parse_mode": "Markdown"}
-        requests.post(url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
+        
+        # Si Telegram rechaza el mensaje, imprimimos la razón exacta
+        if response.status_code != 200:
+            print(f"❌ Telegram rechazó el mensaje. Código {response.status_code}: {response.text}")
+        else:
+            print("✉️ Alerta de Telegram enviada con éxito al canal.")
     except Exception as e:
-        print(f"⚠️ Error Telegram: {e}")
+        print(f"⚠️ Error de conexión de red al intentar llamar a Telegram: {e}")
 
 def get_market_data():
     bars = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
