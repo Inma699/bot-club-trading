@@ -96,20 +96,20 @@ def get_current_position():
 
 def motor_de_trading_bitget():
     global PRECIO_MAXIMO_ALCANZADO
-    print("🦈 Bot Avanzado - Esperando estabilización de red de Render...")
+    # Usamos flush=True para que Render imprima el log sin retrasos
+    print("🦈 Bot Avanzado - Esperando estabilización de red de Render...", flush=True)
     
-    # Pausa de seguridad obligatoria para que Render active la red antes de alertar
     time.sleep(10)
     
-    print("🚀 Lanzando alertas a Telegram...")
+    print("🚀 Lanzando alertas a Telegram...", flush=True)
     enviar_alerta_telegram("🤖 *¡CLUB MARKETSHARKS ACTIVADO!*\n\nAlgoritmo Espejo Bitget operativo en Render 24/7.\nEscaneando Order Blocks y Liquidaciones en vivo...")
 
     try:
         exchange.set_margin_mode('isolated', symbol)
         exchange.set_leverage(leverage, symbol)
-        print("✅ Configuración inicial de Bitget Demo completada.")
+        print("✅ Configuración inicial de Bitget Demo completada.", flush=True)
     except Exception as e:
-        print(f"⚠️ Nota de configuración inicial: {e}")
+        print(f"⚠️ Nota de configuración inicial: {e}", flush=True)
 
     while True:
         try:
@@ -123,10 +123,12 @@ def motor_de_trading_bitget():
             
             if position is None:
                 PRECIO_MAXIMO_ALCANZADO = 0.0
-                print(f"🔍 [{timestamp}] Escaneando... BTC: {price:,.1f} USDT", end="\r")
+                # Cambiamos el end='\r' por un print limpio con flush para que se vea en Render obligatoriamente
+                print(f"🔍 [{timestamp}] Escaneando estructuras... BTC: {price:,.1f} USDT", flush=True)
                 direccion_estrategia = analizar_estrategia_institucional(df)
                 
                 if direccion_estrategia == "COMPRA":
+                    print(f"\n⚡ [{timestamp}] ¡ORDER BLOCK ALCISTA! Intentando LONG.", flush=True)
                     params_bitget = {
                         'symbol': 'BTCUSDT', 'productType': 'USDT-FUTURES', 'marginMode': 'isolated',
                         'marginCoin': 'USDT', 'side': 'buy', 'tradeSide': 'open', 'orderType': 'market', 'size': str(trade_amount)
@@ -136,6 +138,7 @@ def motor_de_trading_bitget():
                     time.sleep(5)
                     
                 elif direccion_estrategia == "VENTA":
+                    print(f"\n⚡ [{timestamp}] ¡ORDER BLOCK BAJISTA! Intentando SHORT.", flush=True)
                     params_bitget = {
                         'symbol': 'BTCUSDT', 'productType': 'USDT-FUTURES', 'marginMode': 'isolated',
                         'marginCoin': 'USDT', 'side': 'sell', 'tradeSide': 'open', 'orderType': 'market', 'size': str(trade_amount)
@@ -159,7 +162,7 @@ def motor_de_trading_bitget():
                     PRECIO_MAXIMO_ALCANZADO = profit_bruto
                     
                 trailing_activo = "SÍ" if PRECIO_MAXIMO_ALCANZADO >= PROFIT_ACTIVACION_TRAILING else "NO"
-                print(f"📊 [{timestamp}] {side.upper()} | Bruto: {profit_bruto:.1f}% | Máx: {PRECIO_MAXIMO_ALCANZADO:.1f}%", end="\r")
+                print(f"📊 [{timestamp}] {side.upper()} | Bruto: {profit_bruto:.1f}% | Máx: {PRECIO_MAXIMO_ALCANZADO:.1f}% | Trailing: {trailing_activo}", flush=True)
                 
                 ejecutar_cierre = False
                 motivo_cierre = ""
@@ -196,7 +199,7 @@ def motor_de_trading_bitget():
                     
             time.sleep(10)
         except Exception as e:
-            print(f"\n❌ Error en bucle: {e}")
+            print(f"\n❌ Error en bucle: {e}", flush=True)
             time.sleep(15)
 
 if __name__ == '__main__':
