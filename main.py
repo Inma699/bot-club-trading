@@ -90,12 +90,18 @@ def get_current_position():
 
 def motor_de_trading_bitget():
     global PRECIO_MAXIMO_ALCANZADO
-    print("🦈 Bot Avanzado - Inicializando bucle...")
-    enviar_alerta_telegram("🤖 ¡Algoritmo Espejo Bitget Activado en Render 24/7!\nEscaneando estructuras institucionales en la Demo...")
+    print("🦈 Bot Avanzado - Esperando estabilización de red de Render...")
+    
+    # Pausa de seguridad obligatoria para que Render active la red antes de alertar
+    time.sleep(10)
+    
+    print("🚀 Lanzando alertas a Telegram...")
+    enviar_alerta_telegram("🤖 *¡CLUB MARKETSHARKS ACTIVADO!*\n\nAlgoritmo Espejo Bitget operativo en Render 24/7.\nEscaneando Order Blocks y Liquidaciones en vivo...")
 
     try:
         exchange.set_margin_mode('isolated', symbol)
         exchange.set_leverage(leverage, symbol)
+        print("✅ Configuración inicial de Bitget Demo completada.")
     except Exception as e:
         print(f"⚠️ Nota de configuración inicial: {e}")
 
@@ -173,7 +179,7 @@ def motor_de_trading_bitget():
                     dinero_neto = margin_per_trade * (profit_neto_porcentaje / 100)
                     
                     msg_cierre = (
-                        f"🏁 *POSICIÓN CERRADA*\n\n"
+                        f"🏁 *POSICIÓN CERRADA EN BITGET*\n\n"
                         f"📋 Motivo: {motivo_cierre}\n"
                         f"📊 Rendimiento Bruto: {profit_bruto:.2f}%\n"
                         f"📈 Rendimiento Neto: {profit_neto_porcentaje:.2f}%\n"
