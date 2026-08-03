@@ -44,6 +44,9 @@ TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", "1.5"))
 AUTO_SIGNAL_ENABLED = os.getenv("AUTO_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "86400"))
 
+MIN_PROFIT_CLOSE_PCT = float(os.getenv("MIN_PROFIT_CLOSE_PCT", "15.0"))
+MAX_POSITION_DURATION_SECONDS = int(os.getenv("MAX_POSITION_DURATION_SECONDS", "600"))
+
 # --- BITGET ---
 exchange = None
 try:
@@ -231,6 +234,7 @@ def open_position(signal, chat_id=None):
         "highest": price,
         "trailing_active": False,
         "contracts": contratos,
+        "opened_at": time.time(),
     }
 
     if exchange is not None:
@@ -260,6 +264,8 @@ def open_position(signal, chat_id=None):
                 "orderType": "limit",
                 "price": str(tp_price),
                 "size": str(contratos),
+                "reduceOnly": True,
+                "timeInForce": "GTC",
             }
             exchange.privateMixPostV2MixOrderPlaceOrder(tp_params)
         except Exception as e:
@@ -304,6 +310,22 @@ def monitor_positions():
             for key in list(POSITIONS.keys()):
                 pos = POSITIONS.get(key)
                 if not pos:
+                    continue
+
+                age = time.time() - pos["opened_at"]
+                profit_pct = 0.0
+
+                if pos["side"] == "long":
+                    profit_pct = (price - pos["entry"]) / pos["entry"] * 100
+                else:
+                    profit_pct = (pos["entry"] - price) / pos["entry"] * 100
+
+                if profit_pct >= MIN_PROFIT_CLOSE_PCT:
+                    close_position(key, f"+{MIN_PROFIT_CLOSE_PCT:.0f}% mínimo")
+                    continue
+
+                if age >= MAX_POSITION_DURATION_SECONDS:
+                    close_position(key, "Tiempo límite 10m")
                     continue
 
                 if pos["side"] == "long":
@@ -362,6 +384,7 @@ def handle_manual_request(chat_id, market_name="BTCUSDT"):
 
 
 def telegram_listener():
+    global AUTO_SIGNAL_ENABLED
     if not TOKEN_TELEGRAM:
         print("⚠️ TOKEN_TELEGRAM no configurado; listener inactivo")
         return
