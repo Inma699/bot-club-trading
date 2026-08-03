@@ -41,8 +41,8 @@ TP_PCT = float(os.getenv("TP_PCT", "20.0"))
 TRAILING_START_PCT = float(os.getenv("TRAILING_START_PCT", "3.0"))
 TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", "1.5"))
 
-AUTO_SIGNAL_ENABLED = os.getenv("AUTO_SIGNAL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
+AUTO_SIGNAL_ENABLED = os.getenv("AUTO_SIGNAL_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "86400"))
 
 # --- BITGET ---
 exchange = None
@@ -72,7 +72,7 @@ def hora_espana():
     return datetime.now(ZoneInfo("Europe/Madrid"))
 
 
-def send_telegram(message, chat_id=None):
+def send_telegram(message, chat_id=None, reply_markup=None):
     target_chat = chat_id or CHAT_ID_CANAL
     if not TOKEN_TELEGRAM or not target_chat:
         return False
@@ -83,6 +83,8 @@ def send_telegram(message, chat_id=None):
         "text": message,
         "parse_mode": "Markdown",
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     try:
         requests.post(url, json=payload, timeout=10)
@@ -90,6 +92,21 @@ def send_telegram(message, chat_id=None):
     except Exception as e:
         print("⚠️ Error enviando Telegram:", e)
         return False
+
+
+def send_start_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "⚡ Señal BTC", "callback_data": "senal_btc"}],
+            [{"text": "📈 Señal SPX", "callback_data": "senal_spx"}],
+            [{"text": "🛑 Auto OFF", "callback_data": "auto_off"}],
+        ]
+    }
+    send_telegram(
+        "🦈 MarketSharks VIP\n\nElige una señal manual:",
+        chat_id=chat_id,
+        reply_markup=keyboard,
+    )
 
 
 def build_signal_message(signal, market_name):
@@ -340,12 +357,32 @@ def telegram_listener():
                     chat_id = message.get("chat", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
 
-                    if text in {"/senal", "/senalahora", "/signal", "senal", "signal", "!senal"}:
+                    if text in {"/start", "/menu", "menu"}:
+                        send_start_menu(chat_id)
+                    elif text in {"/senal", "/senalahora", "/signal", "senal", "signal", "!senal"}:
                         handle_manual_request(chat_id=chat_id, market_name="BTCUSDT")
                     elif text in {"/senalbtc", "senalbtc", "btcmanual"}:
                         handle_manual_request(chat_id=chat_id, market_name="BTCUSDT")
                     elif text in {"/senalspx", "senalspx", "spxmanual"}:
                         handle_manual_request(chat_id=chat_id, market_name="SPXUSDT")
+
+                if "callback_query" in update:
+                    callback = update["callback_query"]
+                    chat_id = callback.get("message", {}).get("chat", {}).get("id")
+                    data = callback.get("data", "")
+                    answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
+
+                    if data == "senal_btc":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
+                        handle_manual_request(chat_id=chat_id, market_name="BTCUSDT")
+
+                    if data == "senal_spx":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPX..."}, timeout=10)
+                        handle_manual_request(chat_id=chat_id, market_name="SPXUSDT")
+
+                    if data == "auto_off":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Auto señales desactivadas"}, timeout=10)
+                        send_telegram("🛑 Las señales automáticas quedan desactivadas.", chat_id=chat_id)
 
         except Exception as e:
             print("⚠️ Error en listener de Telegram:", e)
@@ -363,6 +400,10 @@ def can_send_auto_signal():
 
 
 def auto_trading_loop():
+    if not AUTO_SIGNAL_ENABLED:
+        print("🛑 Motor automático desactivado")
+        return
+
     print("🚀 Motor automático iniciado")
     while not STOP_THREADS.is_set():
         try:
