@@ -117,12 +117,12 @@ def send_start_menu(chat_id):
 def build_signal_message(signal, market_name):
     direction_text = "🟢 *COMPRA*" if signal["direction"] == "COMPRA" else "🔴 *VENTA*"
     return (
-        f"🦈 *SEÑAL DEMO*\n\n"
+        f"🦈 *SEÑAL BTCUSDT*\n\n"
         f"📊 *Mercado:* {market_name}\n"
         f"{direction_text}\n"
         f"💵 *Entrada:* $ {signal['price']:,.2f}\n"
         f"🛡️ *Stop:* $ {signal['stop']:.2f}\n"
-        f"🎯 *Take:* $ {signal['take']:.2f}\n\n"
+        f"🎯 *Take 20%:* $ {signal['take']:.2f}\n\n"
         f"📌 Motivo: {signal['reason']}"
     )
 
@@ -212,12 +212,13 @@ def generate_signal():
 
 
 # --- GESTIÓN DE POSICIONES DEMO ---
-def open_position(signal):
+def open_position(signal, chat_id=chat_id):
     if signal is None:
         return None
 
     side = "long" if signal["direction"] == "COMPRA" else "short"
     price = float(signal["price"])
+    tp_price = price * (1 + TP_PCT / 100) if side == "long" else price * (1 - TP_PCT / 100)
 
     contratos = round((MARGIN_PER_TRADE * LEVERAGE) / price, 4)
     key = f"{side}-{int(time.time() * 1000)}"
@@ -226,13 +227,12 @@ def open_position(signal):
         "side": side,
         "entry": price,
         "stop": float(signal["stop"]),
-        "take": float(signal["take"]),
+        "take": float(tp_price),
         "highest": price,
         "trailing_active": False,
         "contracts": contratos,
     }
 
-    # Intento de apertura real en Bitget si hay credenciales
     if exchange is not None:
         try:
             order_side = "buy" if side == "long" else "sell"
@@ -250,6 +250,16 @@ def open_position(signal):
         except Exception as e:
             print("⚠️ Apertura real fallida, se mantiene solo demo:", e)
 
+    send_telegram(
+        f"✅ Operación BTC abierta en Bitget\n"
+        f"📊 Mercado: BTCUSDT\n"
+        f"🔹 Dirección: {signal['direction']}\n"
+        f"💵 Entrada: $ {price:,.2f}\n"
+        f"🎯 TP 20%: $ {tp_price:,.2f}\n"
+        f"🆔 ID local: {key}",
+        chat_id=chat_id,
+    )
+
     return key
 
 
@@ -258,11 +268,12 @@ def close_position(key, reason):
     if not pos:
         return False
 
-    if pos["side"] == "long":
-        text = f"✅ Posición larga cerrada ({reason})"
-    else:
-        text = f"✅ Posición corta cerrada ({reason})"
-
+    text = (
+        f"✅ Posición BTC cerrada ({reason})\n"
+        f"📊 Mercado: BTCUSDT\n"
+        f"💵 Entrada: $ {pos['entry']:,.2f}\n"
+        f"🎯 TP 20%: $ {pos['take']:,.2f}"
+    )
     send_telegram(text)
     return True
 
@@ -282,7 +293,7 @@ def monitor_positions():
 
                 if pos["side"] == "long":
                     if price >= pos["take"]:
-                        close_position(key, "TP")
+                        close_position(key, "TP 20%")
                     elif price <= pos["stop"]:
                         close_position(key, "Stop Loss")
                     else:
@@ -299,7 +310,7 @@ def monitor_positions():
                                 close_position(key, "Trailing Stop")
                 else:  # short
                     if price <= pos["take"]:
-                        close_position(key, "TP")
+                        close_position(key, "TP 20%")
                     elif price >= pos["stop"]:
                         close_position(key, "Stop Loss")
                     else:
@@ -331,7 +342,7 @@ def handle_manual_request(chat_id, market_name="BTCUSDT"):
     send_telegram(message, chat_id=chat_id)
 
     # abrir posición demo
-    open_position(signal)
+    open_position(signal, chat_id=chat_id)
     return True
 
 
