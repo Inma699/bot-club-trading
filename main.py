@@ -1,212 +1,396 @@
 import os
-import time
-import ccxt
-import pandas as pd
 import threading
+import time
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import ccxt
+import pandas as pd
+
 from flask import Flask
 
-# === MINISERVIDOR WEB PARA EVITAR QUE RENDER SE APAGUE ===
 app = Flask(__name__)
 
-@app.route('/')
+
+@app.route("/")
 def home():
-    return "🦈 Algoritmo Espejo Bitget Demo + Alertas Telegram - Activo 24/7", 200
+    return "Club MarketSharks - Bot Demo + Telegram + Bitget", 200
 
-# ================== CONFIGURACIÓN ==================
-API_KEY = os.getenv('BITGET_API_KEY', 'TU_API_KEY_DEMO')
-SECRET = os.getenv('BITGET_API_SECRET', 'TU_SECRET_DEMO')
-PASSWORD = os.getenv('BITGET_PASSWORD', 'TU_PASSPHRASE_DEMO')
 
+@app.route("/health")
+def health():
+    return "ok", 200
+
+
+# --- CONFIG ---
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-exchange = ccxt.bitget({
-    'apiKey': API_KEY,
-    'secret': SECRET,
-    'password': PASSWORD,
-    'enableRateLimit': True,
-    'options': {'defaultType': 'swap'}
-})
-exchange.set_sandbox_mode(True)
+BITGET_API_KEY = os.getenv("BITGET_API_KEY", "")
+BITGET_API_SECRET = os.getenv("BITGET_API_SECRET", "")
+BITGET_PASSWORD = os.getenv("BITGET_PASSWORD", "")
 
-symbol = 'BTC/USDT:USDT'
+SYMBOL_CCXT = os.getenv("BITGET_SYMBOL", "BTC/USDT:USDT")
+ORDER_SYMBOL = os.getenv("BITGET_ORDER_SYMBOL", "BTCUSDT")
 
-# === CONFIGURACIÓN DINÁMICA DE RIESGO Y TRAILING STOP ===
-margin_per_trade = 2.0      
-leverage = 75               
-COMISIONES_75X = 9.0        
+MARGIN_PER_TRADE = float(os.getenv("MARGIN_PER_TRADE", "2.0"))
+LEVERAGE = int(os.getenv("LEVERAGE", "75"))
 
-PROFIT_ACTIVACION_TRAILING = 15.0  
-DISTANCIA_PERSECUCION = 5.0        
-STOP_LOSS_INICIAL = 15.0           
+TP_PCT = float(os.getenv("TP_PCT", "20.0"))
+TRAILING_START_PCT = float(os.getenv("TRAILING_START_PCT", "3.0"))
+TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", "1.5"))
 
-PRECIO_MAXIMO_ALCANZADO = 0.0
+AUTO_SIGNAL_ENABLED = os.getenv("AUTO_SIGNAL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
 
-def enviar_alerta_telegram(mensaje):
-    if not TOKEN_TELEGRAM or not CHAT_ID_CANAL:
-        print("⚠️ Telegram Error: Faltan credenciales en Render.")
-        return
+# --- BITGET ---
+exchange = None
+try:
+    exchange = ccxt.bitget({
+        "apiKey": BITGET_API_KEY,
+        "secret": BITGET_API_SECRET,
+        "password": BITGET_PASSWORD,
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap"},
+    })
+    exchange.set_sandbox_mode(True)
+    print("✅ Bitget sandbox inicializado")
+except Exception as e:
+    print("⚠️ No se pudo inicializar Bitget:", e)
+    exchange = None
+
+
+# --- ESTADO LOCAL ---
+POSITIONS = {}
+LAST_AUTO_SIGNAL = None
+STOP_THREADS = threading.Event()
+
+
+# --- UTILIDADES ---
+def hora_espana():
+    return datetime.now(ZoneInfo("Europe/Madrid"))
+
+
+def send_telegram(message, chat_id=None):
+    target_chat = chat_id or CHAT_ID_CANAL
+    if not TOKEN_TELEGRAM or not target_chat:
+        return False
+
+    url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
+    payload = {
+        "chat_id": target_chat,
+        "text": message,
+        "parse_mode": "Markdown",
+    }
+
     try:
-        # FORMATO BLINDADO: Separamos el texto de la variable para evitar errores de fusión
-        url = "https://telegram.org" + str(TOKEN_TELEGRAM) + "/sendMessage"
-        
-        payload = {"chat_id": CHAT_ID_CANAL, "text": mensaje, "parse_mode": "Markdown"}
-        response = requests.post(url, json=payload, timeout=10)
-        
-        if response.status_code != 200:
-            print(f"❌ Telegram rechazó el mensaje. Código {response.status_code}: {response.text}", flush=True)
+        requests.post(url, json=payload, timeout=10)
+        return True
+    except Exception as e:
+        print("⚠️ Error enviando Telegram:", e)
+        return False
+
+
+def build_signal_message(signal, market_name):
+    direction_text = "🟢 *COMPRA*" if signal["direction"] == "COMPRA" else "🔴 *VENTA*"
+    return (
+        f"🦈 *SEÑAL DEMO*\n\n"
+        f"📊 *Mercado:* {market_name}\n"
+        f"{direction_text}\n"
+        f"💵 *Entrada:* $ {signal['price']:,.2f}\n"
+        f"🛡️ *Stop:* $ {signal['stop']:.2f}\n"
+        f"🎯 *Take:* $ {signal['take']:.2f}\n\n"
+        f"📌 Motivo: {signal['reason']}"
+    )
+
+
+# --- DATOS DE MERCADO ---
+def fetch_ohlcv(timeframe="1m", limit=80):
+    if exchange is None:
+        return None
+    try:
+        bars = exchange.fetch_ohlcv(SYMBOL_CCXT, timeframe=timeframe, limit=limit)
+        if not bars:
+            return None
+        df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["high"] = pd.to_numeric(df["high"], errors="coerce")
+        df["low"] = pd.to_numeric(df["low"], errors="coerce")
+        return df
+    except Exception as e:
+        print("⚠️ Error fetching OHLCV:", e)
+        return None
+
+
+def get_last_price():
+    if exchange is None:
+        return None
+    try:
+        ticker = exchange.fetch_ticker(SYMBOL_CCXT)
+        return float(ticker.get("last") or ticker.get("close") or 0)
+    except Exception as e:
+        print("⚠️ Error obteniendo precio:", e)
+        return None
+
+
+# --- MOTOR DE SEÑALES ---
+def generate_signal():
+    df = fetch_ohlcv("1m", 80)
+    if df is None or len(df) < 20:
+        return None
+
+    close = df["close"].astype(float)
+    ema5 = close.ewm(span=5, adjust=False).mean()
+    ema13 = close.ewm(span=13, adjust=False).mean()
+
+    price = float(close.iloc[-1])
+    ema5_now = float(ema5.iloc[-1])
+    ema13_now = float(ema13.iloc[-1])
+    ema5_prev = float(ema5.iloc[-2])
+    ema13_prev = float(ema13.iloc[-2])
+    momentum = float(price - close.iloc[-2])
+
+    recent_low = float(df["low"].tail(3).min())
+    recent_high = float(df["high"].tail(3).max())
+
+    if ema5_now > ema13_now and ema5_prev <= ema13_prev and momentum > 0:
+        direction = "COMPRA"
+        stop = min(recent_low, price * 0.995)
+        distance = max(price - stop, 1.0)
+        take = price + distance * 2
+        reason = "Cruce EMA5/EMA13 con impulso positivo"
+    elif ema5_now < ema13_now and ema5_prev >= ema13_prev and momentum < 0:
+        direction = "VENTA"
+        stop = max(recent_high, price * 1.005)
+        distance = max(stop - price, 1.0)
+        take = price - distance * 2
+        reason = "Cruce EMA5/EMA13 con impulso negativo"
+    else:
+        if price > ema13_now:
+            direction = "COMPRA"
+            stop = price * 0.995
+            take = price * 1.01
+            reason = "Fallback conservador: precio por encima de EMA13"
+        elif price < ema13_now:
+            direction = "VENTA"
+            stop = price * 1.005
+            take = price * 0.99
+            reason = "Fallback conservador: precio por debajo de EMA13"
         else:
-            print("✉️ Alerta de Telegram enviada con éxito al canal.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Error de conexión de red al intentar llamar a Telegram: {e}", flush=True)
+            return None
 
-def get_market_data():
-    bars = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
-    df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+    return {
+        "direction": direction,
+        "price": price,
+        "stop": float(stop),
+        "take": float(take),
+        "reason": reason,
+    }
 
-def analizar_estrategia_institucional(df):
-    if len(df) < 5:
-        return None
-    velas = df.tail(5).to_dict('records')
-    v_actual = velas[-1]
-    v_previa = velas[-2]
-    maximo_reciente = max([v['high'] for v in velas[:-1]])
-    minimo_reciente = min([v['low'] for v in velas[:-1]])
-    volumen_promedio = df['volume'].tail(20).mean()
-    volumen_alto = v_actual['volume'] > (volumen_promedio * 1.5)
 
-    if v_actual['low'] <= minimo_reciente and v_actual['close'] > v_previa['close'] and volumen_alto:
-        return "COMPRA"
-    elif v_actual['high'] >= maximo_reciente and v_actual['close'] < v_previa['close'] and volumen_alto:
-        return "VENTA"
-    return None
-
-def get_current_position():
-    try:
-        positions = exchange.fetch_positions([symbol])
-        for p in positions:
-            if p.get('contracts') is not None and float(p.get('contracts', 0)) > 0:
-                return p
-        return None
-    except:
+# --- GESTIÓN DE POSICIONES DEMO ---
+def open_position(signal):
+    if signal is None:
         return None
 
-def motor_de_trading_bitget():
-    global PRECIO_MAXIMO_ALCANZADO
-    # Usamos flush=True para que Render imprima el log sin retrasos
-    print("🦈 Bot Avanzado - Esperando estabilización de red de Render...", flush=True)
-    
-    time.sleep(10)
-    
-    print("🚀 Lanzando alertas a Telegram...", flush=True)
-    enviar_alerta_telegram("🤖 *¡CLUB MARKETSHARKS ACTIVADO!*\n\nAlgoritmo Espejo Bitget operativo en Render 24/7.\nEscaneando Order Blocks y Liquidaciones en vivo...")
+    side = "long" if signal["direction"] == "COMPRA" else "short"
+    price = float(signal["price"])
 
-    try:
-        exchange.set_margin_mode('isolated', symbol)
-        exchange.set_leverage(leverage, symbol)
-        print("✅ Configuración inicial de Bitget Demo completada.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Nota de configuración inicial: {e}", flush=True)
+    contratos = round((MARGIN_PER_TRADE * LEVERAGE) / price, 4)
+    key = f"{side}-{int(time.time() * 1000)}"
 
-    while True:
+    POSITIONS[key] = {
+        "side": side,
+        "entry": price,
+        "stop": float(signal["stop"]),
+        "take": float(signal["take"]),
+        "highest": price,
+        "trailing_active": False,
+        "contracts": contratos,
+    }
+
+    # Intento de apertura real en Bitget si hay credenciales
+    if exchange is not None:
         try:
-            df = get_market_data()
-            price = df['close'].iloc[-1]
-            timestamp = datetime.now().strftime('%H:%M:%S')
-            
-            poder_compra = margin_per_trade * leverage
-            trade_amount = round(poder_compra / price, 4)
-            position = get_current_position()
-            
-            if position is None:
-                PRECIO_MAXIMO_ALCANZADO = 0.0
-                # Cambiamos el end='\r' por un print limpio con flush para que se vea en Render obligatoriamente
-                print(f"🔍 [{timestamp}] Escaneando estructuras... BTC: {price:,.1f} USDT", flush=True)
-                direccion_estrategia = analizar_estrategia_institucional(df)
-                
-                if direccion_estrategia == "COMPRA":
-                    print(f"\n⚡ [{timestamp}] ¡ORDER BLOCK ALCISTA! Intentando LONG.", flush=True)
-                    params_bitget = {
-                        'symbol': 'BTCUSDT', 'productType': 'USDT-FUTURES', 'marginMode': 'isolated',
-                        'marginCoin': 'USDT', 'side': 'buy', 'tradeSide': 'open', 'orderType': 'market', 'size': str(trade_amount)
-                    }
-                    exchange.privateMixPostV2MixOrderPlaceOrder(params_bitget)
-                    enviar_alerta_telegram(f"🟢 *LONG ABIERTO*\n📈 Entrada: {price:,.1f} USDT\n💰 Margen: {margin_per_trade} USDT")
-                    time.sleep(5)
-                    
-                elif direccion_estrategia == "VENTA":
-                    print(f"\n⚡ [{timestamp}] ¡ORDER BLOCK BAJISTA! Intentando SHORT.", flush=True)
-                    params_bitget = {
-                        'symbol': 'BTCUSDT', 'productType': 'USDT-FUTURES', 'marginMode': 'isolated',
-                        'marginCoin': 'USDT', 'side': 'sell', 'tradeSide': 'open', 'orderType': 'market', 'size': str(trade_amount)
-                    }
-                    exchange.privateMixPostV2MixOrderPlaceOrder(params_bitget)
-                    enviar_alerta_telegram(f"🔴 *SHORT ABIERTO*\n📉 Entrada: {price:,.1f} USDT\n💰 Margen: {margin_per_trade} USDT")
-                    time.sleep(5)
-
-            else:
-                side = position['side']
-                entry = float(position['entryPrice'])
-                contracts = float(position['contracts'])
-                
-                profit_bruto = ((price - entry) / entry * 100) * leverage
-                if side == 'short':
-                    profit_bruto = -profit_bruto
-                    
-                if PRECIO_MAXIMO_ALCANZADO == 0.0:
-                    PRECIO_MAXIMO_ALCANZADO = profit_bruto
-                elif profit_bruto > PRECIO_MAXIMO_ALCANZADO:
-                    PRECIO_MAXIMO_ALCANZADO = profit_bruto
-                    
-                trailing_activo = "SÍ" if PRECIO_MAXIMO_ALCANZADO >= PROFIT_ACTIVACION_TRAILING else "NO"
-                print(f"📊 [{timestamp}] {side.upper()} | Bruto: {profit_bruto:.1f}% | Máx: {PRECIO_MAXIMO_ALCANZADO:.1f}% | Trailing: {trailing_activo}", flush=True)
-                
-                ejecutar_cierre = False
-                motivo_cierre = ""
-                
-                if profit_bruto <= -STOP_LOSS_INICIAL:
-                    ejecutar_cierre = True
-                    motivo_cierre = "Stop Loss de seguridad alcanzado"
-                elif PRECIO_MAXIMO_ALCANZADO >= PROFIT_ACTIVACION_TRAILING:
-                    if profit_bruto <= (PRECIO_MAXIMO_ALCANZADO - DISTANCIA_PERSECUCION):
-                        if profit_bruto > COMISIONES_75X:
-                            ejecutar_cierre = True
-                            motivo_cierre = "Trailing Stop ejecutado"
-                
-                if ejecutar_cierre:
-                    close_side = 'sell' if side == 'long' else 'buy'
-                    params_close = {
-                        'symbol': 'BTCUSDT', 'productType': 'USDT-FUTURES', 'marginMode': 'isolated',
-                        'marginCoin': 'USDT', 'side': close_side, 'tradeSide': 'close', 'orderType': 'market', 'size': str(contracts)
-                    }
-                    exchange.privateMixPostV2MixOrderPlaceOrder(params_close)
-                    
-                    profit_neto_porcentaje = profit_bruto - COMISIONES_75X
-                    dinero_neto = margin_per_trade * (profit_neto_porcentaje / 100)
-                    
-                    msg_cierre = (
-                        f"🏁 *POSICIÓN CERRADA EN BITGET*\n\n"
-                        f"📋 Motivo: {motivo_cierre}\n"
-                        f"📊 Rendimiento Bruto: {profit_bruto:.2f}%\n"
-                        f"📈 Rendimiento Neto: {profit_neto_porcentaje:.2f}%\n"
-                        f"💰 *RESULTADO NETO:* `{dinero_neto:+.4f} USDT`"
-                    )
-                    enviar_alerta_telegram(msg_cierre)
-                    time.sleep(10)
-                    
-            time.sleep(10)
+            order_side = "buy" if side == "long" else "sell"
+            params = {
+                "symbol": ORDER_SYMBOL,
+                "productType": "USDT-FUTURES",
+                "marginMode": "isolated",
+                "marginCoin": "USDT",
+                "side": order_side,
+                "tradeSide": "open",
+                "orderType": "market",
+                "size": str(contratos),
+            }
+            exchange.privateMixPostV2MixOrderPlaceOrder(params)
         except Exception as e:
-            print(f"\n❌ Error en bucle: {e}", flush=True)
-            time.sleep(15)
+            print("⚠️ Apertura real fallida, se mantiene solo demo:", e)
 
-if __name__ == '__main__':
-    hilo_bot = threading.Thread(target=motor_de_trading_bitget)
-    hilo_bot.daemon = True
-    hilo_bot.start()
-    
-    puerto = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=puerto)
+    return key
+
+
+def close_position(key, reason):
+    pos = POSITIONS.pop(key, None)
+    if not pos:
+        return False
+
+    if pos["side"] == "long":
+        text = f"✅ Posición larga cerrada ({reason})"
+    else:
+        text = f"✅ Posición corta cerrada ({reason})"
+
+    send_telegram(text)
+    return True
+
+
+def monitor_positions():
+    while not STOP_THREADS.is_set():
+        try:
+            price = get_last_price()
+            if price is None:
+                time.sleep(2)
+                continue
+
+            for key in list(POSITIONS.keys()):
+                pos = POSITIONS.get(key)
+                if not pos:
+                    continue
+
+                if pos["side"] == "long":
+                    if price >= pos["take"]:
+                        close_position(key, "TP")
+                    elif price <= pos["stop"]:
+                        close_position(key, "Stop Loss")
+                    else:
+                        if price > pos["highest"]:
+                            pos["highest"] = price
+
+                        beneficio_pct = (price - pos["entry"]) / pos["entry"] * 100
+                        if (not pos["trailing_active"]) and beneficio_pct >= TRAILING_START_PCT:
+                            pos["trailing_active"] = True
+
+                        if pos["trailing_active"]:
+                            trail_price = pos["highest"] * (1 - TRAILING_DISTANCE_PCT / 100)
+                            if price <= trail_price:
+                                close_position(key, "Trailing Stop")
+                else:  # short
+                    if price <= pos["take"]:
+                        close_position(key, "TP")
+                    elif price >= pos["stop"]:
+                        close_position(key, "Stop Loss")
+                    else:
+                        if price < pos["highest"]:
+                            pos["highest"] = price
+
+                        beneficio_pct = (pos["entry"] - price) / pos["entry"] * 100
+                        if (not pos["trailing_active"]) and beneficio_pct >= TRAILING_START_PCT:
+                            pos["trailing_active"] = True
+
+                        if pos["trailing_active"]:
+                            trail_price = pos["highest"] * (1 + TRAILING_DISTANCE_PCT / 100)
+                            if price >= trail_price:
+                                close_position(key, "Trailing Stop")
+        except Exception as e:
+            print("⚠️ Error en monitor_positions:", e)
+
+        time.sleep(2)
+
+
+# --- TELEGRAM ---
+def handle_manual_request(chat_id, market_name="BTCUSDT"):
+    signal = generate_signal()
+    if not signal:
+        send_telegram("⚠️ No se pudo construir una señal en este momento.", chat_id=chat_id)
+        return False
+
+    message = build_signal_message(signal, market_name)
+    send_telegram(message, chat_id=chat_id)
+
+    # abrir posición demo
+    open_position(signal)
+    return True
+
+
+def telegram_listener():
+    if not TOKEN_TELEGRAM:
+        print("⚠️ TOKEN_TELEGRAM no configurado; listener inactivo")
+        return
+
+    offset = None
+    while not STOP_THREADS.is_set():
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/getUpdates"
+            params = {"timeout": 10}
+            if offset is not None:
+                params["offset"] = offset
+
+            r = requests.get(url, params=params, timeout=15)
+            if r.status_code != 200:
+                time.sleep(2)
+                continue
+
+            updates = r.json().get("result", [])
+            for update in updates:
+                offset = update.get("update_id", 0) + 1
+
+                if "message" in update:
+                    message = update["message"]
+                    chat_id = message.get("chat", {}).get("id")
+                    text = (message.get("text") or "").strip().lower()
+
+                    if text in {"/senal", "/senalahora", "/signal", "senal", "signal", "!senal"}:
+                        handle_manual_request(chat_id=chat_id, market_name="BTCUSDT")
+                    elif text in {"/senalbtc", "senalbtc", "btcmanual"}:
+                        handle_manual_request(chat_id=chat_id, market_name="BTCUSDT")
+                    elif text in {"/senalspx", "senalspx", "spxmanual"}:
+                        handle_manual_request(chat_id=chat_id, market_name="SPXUSDT")
+
+        except Exception as e:
+            print("⚠️ Error en listener de Telegram:", e)
+        time.sleep(1)
+
+
+# --- MOTOR AUTOMÁTICO ---
+def can_send_auto_signal():
+    global LAST_AUTO_SIGNAL
+    if not AUTO_SIGNAL_ENABLED:
+        return False
+    if LAST_AUTO_SIGNAL is None:
+        return True
+    return (time.time() - LAST_AUTO_SIGNAL["timestamp"]) >= AUTO_SIGNAL_COOLDOWN_SECONDS
+
+
+def auto_trading_loop():
+    print("🚀 Motor automático iniciado")
+    while not STOP_THREADS.is_set():
+        try:
+            if can_send_auto_signal():
+                signal = generate_signal()
+                if signal:
+                    send_telegram(build_signal_message(signal, "BTCUSDT"))
+                    open_position(signal)
+                    LAST_AUTO_SIGNAL = {
+                        "timestamp": time.time(),
+                        "direction": signal["direction"],
+                    }
+            time.sleep(30)
+        except Exception as e:
+            print("⚠️ Error en auto_trading_loop:", e)
+            time.sleep(5)
+
+
+# --- ARRANQUE ---
+if __name__ == "__main__":
+    hilo_listener = threading.Thread(target=telegram_listener, daemon=True)
+    hilo_listener.start()
+
+    hilo_monitor = threading.Thread(target=monitor_positions, daemon=True)
+    hilo_monitor.start()
+
+    hilo_auto = threading.Thread(target=auto_trading_loop, daemon=True)
+    hilo_auto.start()
+
+    puerto = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=puerto)
