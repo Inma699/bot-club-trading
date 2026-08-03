@@ -106,8 +106,10 @@ def send_start_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [{"text": "⚡ Señal BTC", "callback_data": "senal_btc"}],
-            [{"text": "▶️ Auto ON", "callback_data": "auto_on"},
-             {"text": "🛑 Auto OFF", "callback_data": "auto_off"}],
+            [
+                {"text": "▶️ Auto ON", "callback_data": "auto_on"},
+                {"text": "🛑 Auto OFF", "callback_data": "auto_off"},
+            ],
         ]
     }
     send_telegram(
@@ -131,7 +133,7 @@ def build_signal_message(signal, market_name):
 
 
 # --- DATOS DE MERCADO ---
-def fetch_ohlcv(timeframe="1m", limit=80):
+def fetch_ohlcv_timeframe(timeframe, limit=80):
     if exchange is None:
         return None
     try:
@@ -139,89 +141,91 @@ def fetch_ohlcv(timeframe="1m", limit=80):
         if not bars:
             return None
         df = pd.DataFrame(bars, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["open"] = pd.to_numeric(df["open"], errors="coerce")
         df["high"] = pd.to_numeric(df["high"], errors="coerce")
         df["low"] = pd.to_numeric(df["low"], errors="coerce")
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
         return df
     except Exception as e:
         print("⚠️ Error fetching OHLCV:", e)
         return None
 
 
-def get_last_price():
-    if exchange is None:
-        return None
-    try:
-        ticker = exchange.fetch_ticker(SYMBOL_CCXT)
-        return float(ticker.get("last") or ticker.get("close") or 0)
-    except Exception as e:
-        print("⚠️ Error obteniendo precio:", e)
-        return None
-
-
-# --- MOTOR DE SEÑALES ---
-def generate_signal():
-    df = fetch_ohlcv("1m", 80)
+def find_order_block(df):
     if df is None or len(df) < 20:
+        return None, None, None, None
+
+    atr = (df["high"] - df["low"]).rolling(14).mean().iloc[-1]
+    for i in range(len(df) - 3, 1, -1):
+        base = df.iloc[i]
+        impulse = df.iloc[i + 1]
+
+        if base["close"] < base["open"] and impulse["close"] > impulse["open"]:
+            if impulse["high"] > base["high"] and (impulse["high"] - impulse["low"]) > atr * 1.1:
+                return "long", base["low"], base["high"], atr
+
+        if base["close"] > base["open"] and impulse["close"] < impulse["open"]:
+            if impulse["low"] < base["low"] and (impulse["high"] - impulse["low"]) > atr * 1.1:
+                return "short", base["high"], base["low"], atr
+
+    return None, None, None, atr
+
+
+def generate_signal():
+    df_1h = fetch_ohlcv_timeframe("1h", 80)
+    df_15m = fetch_ohlcv_timeframe("15m", 80)
+    if df_1h is None or df_15m is None:
         return None
 
-    close = df["close"].astype(float)
-    ema5 = close.ewm(span=5, adjust=False).mean()
-    ema13 = close.ewm(span=13, adjust=False).mean()
+    current = float(df_15m["close"].iloc[-1])
+    range_20 = df_15m["high"].tail(20).max() - df_15m["low"].tail(20).min()
+    range_pct = range_20 / current * 100
 
-    price = float(close.iloc[-1])
-    ema5_now = float(ema5.iloc[-1])
-    ema13_now = float(ema13.iloc[-1])
-    ema5_prev = float(ema5.iloc[-2])
-    ema13_prev = float(ema13.iloc[-2])
-    momentum = float(price - close.iloc[-2])
+    if range_pct < 0.45:
+        return None
 
-    recent_low = float(df["low"].tail(3).min())
-    recent_high = float(df["high"].tail(3).max())
+    ob_side, zone_low, zone_high, atr_1h = find_order_block(df_1h)
+    if ob_side is None:
+        return None
 
-    if ema5_now > ema13_now and ema5_prev <= ema13_prev and momentum > 0:
-        direction = "COMPRA"
-        stop = min(recent_low, price * 0.995)
-        distance = max(price - stop, 1.0)
-        take = price + distance * 2
-        reason = "Cruce EMA5/EMA13 con impulso positivo"
-    elif ema5_now < ema13_now and ema5_prev >= ema13_prev and momentum < 0:
-        direction = "VENTA"
-        stop = max(recent_high, price * 1.005)
-        distance = max(stop - price, 1.0)
-        take = price - distance * 2
-        reason = "Cruce EMA5/EMA13 con impulso negativo"
-    else:
-        if price > ema13_now:
-            direction = "COMPRA"
-            stop = price * 0.995
-            take = price * 1.01
-            reason = "Fallback conservador: precio por encima de EMA13"
-        elif price < ema13_now:
-            direction = "VENTA"
-            stop = price * 1.005
-            take = price * 0.99
-            reason = "Fallback conservador: precio por debajo de EMA13"
-        else:
+    ema15_13 = df_15m["close"].ewm(span=13, adjust=False).mean().iloc[-1]
+    ema15_5 = df_15m["close"].ewm(span=5, adjust=False).mean().iloc[-1]
+    if df_15m["close"].iloc[-1] < df_15m["close"].iloc[-2]:
+        return None
+
+    if ob_side == "long":
+        if not (zone_low * 0.995 <= current <= zone_high * 1.01):
             return None
+        if current < ema15_13:
+            return None
+        stop = min(zone_low * 0.994, current - atr_1h * 0.8)
+        take = current * 1.12
+        reason = "Order Block long + confirmación 15m"
+    else:
+        if not (zone_high * 0.995 >= current >= zone_low * 1.01):
+            return None
+        if current > ema15_13:
+            return None
+        stop = max(zone_high * 1.006, current + atr_1h * 0.8)
+        take = current * 0.88
+        reason = "Order Block short + confirmación 15m"
 
     return {
-        "direction": direction,
-        "price": price,
+        "direction": "COMPRA" if ob_side == "long" else "VENTA",
+        "price": current,
         "stop": float(stop),
         "take": float(take),
         "reason": reason,
     }
 
 
-# --- GESTIÓN DE POSICIONES DEMO ---
 def open_position(signal, chat_id=None):
     if signal is None:
         return None
 
     side = "long" if signal["direction"] == "COMPRA" else "short"
     price = float(signal["price"])
-    tp_price = price * (1 + TP_PCT / 100) if side == "long" else price * (1 - TP_PCT / 100)
+    tp_price = price * (1 + 0.12) if side == "long" else price * (1 - 0.12)
 
     contratos = round((MARGIN_PER_TRADE * LEVERAGE) / price, 4)
     key = f"{side}-{int(time.time() * 1000)}"
@@ -250,9 +254,9 @@ def open_position(signal, chat_id=None):
                 "orderType": "market",
                 "size": str(contratos),
             }
-            exchange.privateMixPostV2MixOrderPlaceOrder(params)
+            open_resp = exchange.privateMixPostV2MixOrderPlaceOrder(params)
+            print("open order response:", open_resp)
 
-            # Crear take profit en el exchange
             take_side = "sell" if side == "long" else "buy"
             tp_params = {
                 "symbol": ORDER_SYMBOL,
@@ -267,20 +271,21 @@ def open_position(signal, chat_id=None):
                 "reduceOnly": True,
                 "timeInForce": "GTC",
             }
-            exchange.privateMixPostV2MixOrderPlaceOrder(tp_params)
+            tp_resp = exchange.privateMixPostV2MixOrderPlaceOrder(tp_params)
+            print("tp order response:", tp_resp)
         except Exception as e:
-            print("⚠️ Apertura real fallida, se mantiene solo demo:", e)
+            print("⚠️ Error orden Bitget:", e)
+            send_telegram(f"⚠️ Error en Bitget al abrir posición: {e}", chat_id=chat_id)
 
     send_telegram(
         f"✅ Operación BTC abierta en Bitget\n"
         f"📊 Mercado: BTCUSDT\n"
         f"🔹 Dirección: {signal['direction']}\n"
         f"💵 Entrada: $ {price:,.2f}\n"
-        f"🎯 TP 20%: $ {tp_price:,.2f}\n"
+        f"🎯 TP 12%: $ {tp_price:,.2f}\n"
         f"🆔 ID local: {key}",
         chat_id=chat_id,
     )
-
     return key
 
 
@@ -289,14 +294,48 @@ def close_position(key, reason):
     if not pos:
         return False
 
+    if exchange is not None:
+        try:
+            side_close = "sell" if pos["side"] == "long" else "buy"
+            params = {
+                "symbol": ORDER_SYMBOL,
+                "productType": "USDT-FUTURES",
+                "marginMode": "isolated",
+                "marginCoin": "USDT",
+                "side": side_close,
+                "tradeSide": "close",
+                "orderType": "market",
+                "size": str(pos["contracts"]),
+            }
+            close_resp = exchange.privateMixPostV2MixOrderPlaceOrder(params)
+            print("close order response:", close_resp)
+        except Exception as e:
+            print("⚠️ Error cerrando posición en Bitget:", e)
+            send_telegram(f"⚠️ Falló cierre real en Bitget: {e}")
+            return False
+
     text = (
         f"✅ Posición BTC cerrada ({reason})\n"
         f"📊 Mercado: BTCUSDT\n"
         f"💵 Entrada: $ {pos['entry']:,.2f}\n"
-        f"🎯 TP 20%: $ {pos['take']:,.2f}"
+        f"🎯 TP 12%: $ {pos['take']:,.2f}"
     )
     send_telegram(text)
     return True
+
+
+def get_last_price():
+    if exchange is None:
+        return None
+    try:
+        ticker = exchange.fetch_ticker(SYMBOL_CCXT)
+        last = ticker.get("last")
+        if last is None:
+            last = ticker.get("close")
+        return float(last) if last is not None else None
+    except Exception as e:
+        print("⚠️ Error obteniendo precio de Bitget:", e)
+        return None
 
 
 def monitor_positions():
@@ -313,15 +352,10 @@ def monitor_positions():
                     continue
 
                 age = time.time() - pos["opened_at"]
-                profit_pct = 0.0
+                profit_pct = ((price - pos["entry"]) / pos["entry"] * 100) if pos["side"] == "long" else ((pos["entry"] - price) / pos["entry"] * 100)
 
-                if pos["side"] == "long":
-                    profit_pct = (price - pos["entry"]) / pos["entry"] * 100
-                else:
-                    profit_pct = (pos["entry"] - price) / pos["entry"] * 100
-
-                if profit_pct >= MIN_PROFIT_CLOSE_PCT:
-                    close_position(key, f"+{MIN_PROFIT_CLOSE_PCT:.0f}% mínimo")
+                if profit_pct >= 12.0:
+                    close_position(key, "TP 12%")
                     continue
 
                 if age >= MAX_POSITION_DURATION_SECONDS:
@@ -329,42 +363,23 @@ def monitor_positions():
                     continue
 
                 if pos["side"] == "long":
-                    if price >= pos["take"]:
-                        close_position(key, "TP 20%")
-                    elif price <= pos["stop"]:
+                    if price <= pos["stop"]:
                         close_position(key, "Stop Loss")
+                    elif price >= pos["take"]:
+                        close_position(key, "TP 12%")
                     else:
                         if price > pos["highest"]:
                             pos["highest"] = price
-
-                        beneficio_pct = (price - pos["entry"]) / pos["entry"] * 100
-                        if (not pos["trailing_active"]) and beneficio_pct >= TRAILING_START_PCT:
-                            pos["trailing_active"] = True
-
-                        if pos["trailing_active"]:
-                            trail_price = pos["highest"] * (1 - TRAILING_DISTANCE_PCT / 100)
-                            if price <= trail_price:
-                                close_position(key, "Trailing Stop")
-                else:  # short
-                    if price <= pos["take"]:
-                        close_position(key, "TP 20%")
-                    elif price >= pos["stop"]:
+                else:
+                    if price >= pos["stop"]:
                         close_position(key, "Stop Loss")
+                    elif price <= pos["take"]:
+                        close_position(key, "TP 12%")
                     else:
                         if price < pos["highest"]:
                             pos["highest"] = price
-
-                        beneficio_pct = (pos["entry"] - price) / pos["entry"] * 100
-                        if (not pos["trailing_active"]) and beneficio_pct >= TRAILING_START_PCT:
-                            pos["trailing_active"] = True
-
-                        if pos["trailing_active"]:
-                            trail_price = pos["highest"] * (1 + TRAILING_DISTANCE_PCT / 100)
-                            if price >= trail_price:
-                                close_position(key, "Trailing Stop")
         except Exception as e:
             print("⚠️ Error en monitor_positions:", e)
-
         time.sleep(2)
 
 
