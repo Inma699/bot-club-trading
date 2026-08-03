@@ -103,12 +103,11 @@ def send_start_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [{"text": "⚡ Señal BTC", "callback_data": "senal_btc"}],
-            [{"text": "📈 Señal SPX", "callback_data": "senal_spx"}],
             [{"text": "🛑 Auto OFF", "callback_data": "auto_off"}],
         ]
     }
     send_telegram(
-        "🦈 MarketSharks VIP\n\nElige una señal manual:",
+        "🦈 MarketSharks VIP\n\nElige una señal manual para BTCUSDT:",
         chat_id=chat_id,
         reply_markup=keyboard,
     )
@@ -212,7 +211,7 @@ def generate_signal():
 
 
 # --- GESTIÓN DE POSICIONES DEMO ---
-def open_position(signal, chat_id=chat_id):
+def open_position(signal, chat_id=None):
     if signal is None:
         return None
 
@@ -342,7 +341,7 @@ def handle_manual_request(chat_id, market_name="BTCUSDT"):
     send_telegram(message, chat_id=chat_id)
 
     # abrir posición demo
-    open_position(signal, chat_id=chat_id)
+    open_position(signal, chat_id=CHAT_ID_CANAL)
     return True
 
 
