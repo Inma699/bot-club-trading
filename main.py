@@ -103,7 +103,8 @@ def send_start_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [{"text": "⚡ Señal BTC", "callback_data": "senal_btc"}],
-            [{"text": "🛑 Auto OFF", "callback_data": "auto_off"}],
+            [{"text": "▶️ Auto ON", "callback_data": "auto_on"},
+             {"text": "🛑 Auto OFF", "callback_data": "auto_off"}],
         ]
     }
     send_telegram(
@@ -246,6 +247,21 @@ def open_position(signal, chat_id=None):
                 "size": str(contratos),
             }
             exchange.privateMixPostV2MixOrderPlaceOrder(params)
+
+            # Crear take profit en el exchange
+            take_side = "sell" if side == "long" else "buy"
+            tp_params = {
+                "symbol": ORDER_SYMBOL,
+                "productType": "USDT-FUTURES",
+                "marginMode": "isolated",
+                "marginCoin": "USDT",
+                "side": take_side,
+                "tradeSide": "close",
+                "orderType": "limit",
+                "price": str(tp_price),
+                "size": str(contratos),
+            }
+            exchange.privateMixPostV2MixOrderPlaceOrder(tp_params)
         except Exception as e:
             print("⚠️ Apertura real fallida, se mantiene solo demo:", e)
 
@@ -395,9 +411,15 @@ def telegram_listener():
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPX..."}, timeout=10)
                         handle_manual_request(chat_id=chat_id, market_name="SPXUSDT")
 
+                    if data == "auto_on":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Auto señales activadas"}, timeout=10)
+                        AUTO_SIGNAL_ENABLED = True
+                        send_telegram("▶️ Señales automáticas activadas.", chat_id=chat_id)
+
                     if data == "auto_off":
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Auto señales desactivadas"}, timeout=10)
-                        send_telegram("🛑 Las señales automáticas quedan desactivadas.", chat_id=chat_id)
+                        AUTO_SIGNAL_ENABLED = False
+                        send_telegram("🛑 Señales automáticas desactivadas.", chat_id=chat_id)
 
         except Exception as e:
             print("⚠️ Error en listener de Telegram:", e)
@@ -415,18 +437,14 @@ def can_send_auto_signal():
 
 
 def auto_trading_loop():
-    if not AUTO_SIGNAL_ENABLED:
-        print("🛑 Motor automático desactivado")
-        return
-
     print("🚀 Motor automático iniciado")
     while not STOP_THREADS.is_set():
         try:
-            if can_send_auto_signal():
+            if AUTO_SIGNAL_ENABLED and can_send_auto_signal():
                 signal = generate_signal()
                 if signal:
                     send_telegram(build_signal_message(signal, "BTCUSDT"))
-                    open_position(signal)
+                    open_position(signal, chat_id=CHAT_ID_CANAL)
                     LAST_AUTO_SIGNAL = {
                         "timestamp": time.time(),
                         "direction": signal["direction"],
