@@ -65,6 +65,7 @@ except Exception as e:
 POSITIONS = {}
 LAST_AUTO_SIGNAL = None
 STOP_THREADS = threading.Event()
+STARTUP_MENU_SENT = False
 
 
 # --- UTILIDADES ---
@@ -75,6 +76,7 @@ def hora_espana():
 def send_telegram(message, chat_id=None, reply_markup=None):
     target_chat = chat_id or CHAT_ID_CANAL
     if not TOKEN_TELEGRAM or not target_chat:
+        print("⚠️ No se envía Telegram: falta TOKEN_TELEGRAM o TELEGRAM_CHAT_ID")
         return False
 
     url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
@@ -87,7 +89,10 @@ def send_telegram(message, chat_id=None, reply_markup=None):
         payload["reply_markup"] = reply_markup
 
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            print("⚠️ Error Telegram:", r.text)
+            return False
         return True
     except Exception as e:
         print("⚠️ Error enviando Telegram:", e)
@@ -423,6 +428,18 @@ def auto_trading_loop():
 
 
 # --- ARRANQUE ---
+def send_channel_startup_message():
+    global STARTUP_MENU_SENT
+    if STARTUP_MENU_SENT:
+        return
+    if not CHAT_ID_CANAL:
+        print("⚠️ No se envía mensaje inicial: TELEGRAM_CHAT_ID vacío")
+        return
+
+    send_start_menu(CHAT_ID_CANAL)
+    STARTUP_MENU_SENT = True
+
+
 if __name__ == "__main__":
     hilo_listener = threading.Thread(target=telegram_listener, daemon=True)
     hilo_listener.start()
@@ -432,6 +449,11 @@ if __name__ == "__main__":
 
     hilo_auto = threading.Thread(target=auto_trading_loop, daemon=True)
     hilo_auto.start()
+
+    try:
+        send_channel_startup_message()
+    except Exception as e:
+        print("⚠️ Error enviando mensaje inicial al canal:", e)
 
     puerto = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=puerto)
