@@ -230,17 +230,7 @@ def open_position(signal, chat_id=None):
     contratos = round((MARGIN_PER_TRADE * LEVERAGE) / price, 4)
     key = f"{side}-{int(time.time() * 1000)}"
 
-    POSITIONS[key] = {
-        "side": side,
-        "entry": price,
-        "stop": float(signal["stop"]),
-        "take": float(tp_price),
-        "highest": price,
-        "trailing_active": False,
-        "contracts": contratos,
-        "opened_at": time.time(),
-    }
-
+    # Intentar abrir en Bitget primero; sólo crear la posición local si la apertura remota fue exitosa
     if exchange is not None:
         try:
             order_side = "buy" if side == "long" else "sell"
@@ -268,14 +258,43 @@ def open_position(signal, chat_id=None):
                 "orderType": "limit",
                 "price": str(tp_price),
                 "size": str(contratos),
-                "reduceOnly": True,
                 "timeInForce": "GTC",
             }
-            tp_resp = exchange.privateMixPostV2MixOrderPlaceOrder(tp_params)
-            print("tp order response:", tp_resp)
+            # evitar enviar `reduceOnly` si la API lo rechaza
+            try:
+                tp_resp = exchange.privateMixPostV2MixOrderPlaceOrder(tp_params)
+                print("tp order response:", tp_resp)
+            except Exception as e2:
+                print("⚠️ Error creando TP en Bitget (se ignorará y se seguirá con posición local):", e2)
+
+            # Sólo registrar la posición local si no hubo excepción en la apertura
+            POSITIONS[key] = {
+                "side": side,
+                "entry": price,
+                "stop": float(signal["stop"]),
+                "take": float(tp_price),
+                "highest": price,
+                "trailing_active": False,
+                "contracts": contratos,
+                "opened_at": time.time(),
+            }
         except Exception as e:
             print("⚠️ Error orden Bitget:", e)
             send_telegram(f"⚠️ Error en Bitget al abrir posición: {e}", chat_id=chat_id)
+            return None
+
+    # En caso de exchange None, registramos la posición local igualmente (modo demo)
+    if exchange is None:
+        POSITIONS[key] = {
+            "side": side,
+            "entry": price,
+            "stop": float(signal["stop"]),
+            "take": float(tp_price),
+            "highest": price,
+            "trailing_active": False,
+            "contracts": contratos,
+            "opened_at": time.time(),
+        }
 
     send_telegram(
         f"✅ Operación BTC abierta en Bitget\n"
@@ -290,7 +309,7 @@ def open_position(signal, chat_id=None):
 
 
 def close_position(key, reason):
-    pos = POSITIONS.pop(key, None)
+    pos = POSITIONS.get(key)
     if not pos:
         return False
 
@@ -313,6 +332,9 @@ def close_position(key, reason):
             print("⚠️ Error cerrando posición en Bitget:", e)
             send_telegram(f"⚠️ Falló cierre real en Bitget: {e}")
             return False
+
+        # Si el cierre remoto fue exitoso, entonces eliminamos la posición local
+        POSITIONS.pop(key, None)
 
     text = (
         f"✅ Posición BTC cerrada ({reason})\n"
