@@ -19,7 +19,7 @@ CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
     {"symbol": "BTCUSDT", "interval": "15m", "nombre": "BTCUSDT (15m)"},
-    {"symbol": "SPXCUSDT", "interval": "1h", "nombre": "SPXCUSDT (1h)"},
+    {"symbol": "SPXUSDT", "interval": "15m", "nombre": "SPXUSDT (15m/1h)", "fallback_intervals": ["1h"], "aliases": ["SPXUSDT"]},
 ]
 
 # === ESTADÍSTICAS DIARIAS ===
@@ -47,10 +47,34 @@ ESTADO_DIARIO = {
 
 # === CONTROL DE SOLICITUDES MANUALES ===
 SOLICITUDES_MANUALES = {}
+ADMINS_CANAL = set()
+
+
+def cargar_admins_del_canal():
+    global ADMINS_CANAL
+    raw_ids = os.getenv("TELEGRAM_ADMIN_IDS", os.getenv("ADMINS_CANAL_IDS", os.getenv("ADMINS_CANAL", ""))).strip()
+    ids = set()
+    if raw_ids:
+        for parte in raw_ids.replace(";", ",").split(","):
+            valor = parte.strip()
+            if valor:
+                ids.add(valor)
+    if CHAT_ID_CANAL:
+        ids.add(CHAT_ID_CANAL)
+    ADMINS_CANAL = {str(item) for item in ids}
+
+
+cargar_admins_del_canal()
+
+
+def es_admin_del_canal(chat_id=None):
+    if not chat_id:
+        return False
+    return str(chat_id) in ADMINS_CANAL
 
 # === CONTROL DE SEÑALES AUTOMÁTICAS ===
-AUTO_SIGNAL_ENABLED_VALUE = os.getenv("AUTO_SIGNAL_ENABLED")
-AUTO_SIGNAL_ENABLED = False if AUTO_SIGNAL_ENABLED_VALUE is None else AUTO_SIGNAL_ENABLED_VALUE.lower() in {"1", "true", "yes", "on"}
+AUTO_SIGNAL_ENABLED_VALUE = os.getenv("AUTO_SIGNAL_ENABLED", "true")
+AUTO_SIGNAL_ENABLED = AUTO_SIGNAL_ENABLED_VALUE.lower() in {"1", "true", "yes", "on"}
 AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
 ULTIMA_SENAL_AUTOMATICA = None
 DETENER_BOT = threading.Event()
@@ -62,10 +86,12 @@ def stop_bot():
     return "Bot detenido", 200
 
 
-def puede_enviar_senal_automatica():
+def puede_enviar_senal_automatica(forzar=False):
     global ULTIMA_SENAL_AUTOMATICA
     if not AUTO_SIGNAL_ENABLED:
         return False
+    if forzar:
+        return True
     if ULTIMA_SENAL_AUTOMATICA is None:
         return True
     return (time.time() - ULTIMA_SENAL_AUTOMATICA["timestamp"]) >= AUTO_SIGNAL_COOLDOWN_SECONDS
@@ -114,20 +140,43 @@ def evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos):
     return fuerza, {"cambio_1": cambio_1, "cambio_3": cambio_3, "rango_3": rango_3}
 
 
+def evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_actual, ema_200):
+    if len(cierres) < 5:
+        return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Datos insuficientes"}
+
+    cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100
+    cambio_3 = ((cierres[-1] - cierres[-3]) / cierres[-3]) * 100
+    volumen_actual = volumenes[-1]
+    volumen_promedio = sum(volumenes[-3:]) / max(1, len(volumenes[-3:]))
+    spike_volumen = volumen_actual / max(volumen_promedio, 1)
+    impulso_alza = cambio_1 >= 0.4 and cambio_3 >= 0.4 and spike_volumen >= 1.4 and precio_actual > ema_200
+    impulso_baja = cambio_1 <= -0.4 and cambio_3 <= -0.4 and spike_volumen >= 1.4 and precio_actual < ema_200
+
+    if impulso_alza:
+        return {"detectado": True, "direccion": "COMPRA", "motivo": f"Impulso fuerte al alza: cambio_1 {cambio_1:.2f}% | volumen {spike_volumen:.2f}x"}
+    if impulso_baja:
+        return {"detectado": True, "direccion": "VENTA", "motivo": f"Impulso fuerte a la baja: cambio_1 {cambio_1:.2f}% | volumen {spike_volumen:.2f}x"}
+    return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Sin impulso fuerte"}
+
+
 def obtener_datos_binance(symbol, interval, limit=210):
     urls = [
         ("https://api.binance.com/api/v3/klines", {}),
         ("https://api.binance.us/api/v3/klines", {}),
     ]
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    for url, extra_params in urls:
-        try:
-            response = requests.get(url, params={**params, **extra_params}, timeout=10)
-            if response.status_code == 200:
-                return response.json()
-            print(f"⚠️ {url} devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
-        except Exception as e:
-            print(f"⚠️ Error consultando {url} para {symbol} {interval}: {e}")
+    symbols = [symbol]
+    if symbol == "SPXUSDT":
+        symbols.extend(["SPXUSDT"])
+    for candidate_symbol in symbols:
+        params = {"symbol": candidate_symbol, "interval": interval, "limit": limit}
+        for url, extra_params in urls:
+            try:
+                response = requests.get(url, params={**params, **extra_params}, timeout=10)
+                if response.status_code == 200:
+                    return response.json()
+                print(f"⚠️ {url} devolvió estado {response.status_code} para {candidate_symbol} {interval}: {response.text[:200]}")
+            except Exception as e:
+                print(f"⚠️ Error consultando {url} para {candidate_symbol} {interval}: {e}")
     return None
 
 
@@ -339,6 +388,40 @@ def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
         print(f"⚠️ Error enviando señal a Telegram: {e}")
 
 
+def estado_auto_texto():
+    return "activadas" if AUTO_SIGNAL_ENABLED else "desactivadas"
+
+
+def construir_markup_control_auto():
+    status_text = "✅ Señales automáticas activadas" if AUTO_SIGNAL_ENABLED else "🚫 Señales automáticas desactivadas"
+    return {
+        "inline_keyboard": [
+            [{"text": "BTC manual", "callback_data": "senal_btc"}],
+            [{"text": "SPX manual", "callback_data": "senal_spx"}],
+            [
+                {"text": "Activar automáticas", "callback_data": "activar_auto"},
+                {"text": "Desactivar automáticas", "callback_data": "desactivar_auto"},
+            ],
+            [{"text": status_text, "callback_data": "estado_auto"}],
+        ]
+    }
+
+
+def actualizar_estado_auto(activado, chat_id=None, requester_id=None):
+    global AUTO_SIGNAL_ENABLED
+    AUTO_SIGNAL_ENABLED = bool(activado)
+    mensaje = (
+        "🟢 *SEÑALES AUTOMÁTICAS ACTIVADAS*\n\n"
+        "El bot ahora enviará señales automáticas cuando se cumplan las condiciones de la estrategia.\n"
+        "Sigue habilitado el envío de señales manuales mediante /senal, /senalbtc y /senalspx."
+        if activado else
+        "🔴 *SEÑALES AUTOMÁTICAS DESACTIVADAS*\n\n"
+        "El bot ya no enviará señales automáticas. Solo se atenderán solicitudes manuales en Telegram."
+    )
+    enviar_senal_telegram(mensaje, chat_id=chat_id)
+    print(f"🔧 Señales automáticas {'activadas' if activado else 'desactivadas'} por {'admin' if requester_id else 'sistema'}.")
+
+
 def enviar_resumen_diario():
     global ESTADISTICAS
     hoy = time.strftime("%Y-%m-%d")
@@ -381,99 +464,170 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
     )
 
 
+def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
+    intervalos = [mercado.get("interval", "15m")]
+    if mercado.get("symbol") == "SPXUSDT":
+        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"])
+
+    for interval in intervalos:
+        datos = obtener_datos_binance(mercado["symbol"], interval)
+        if not datos:
+            continue
+
+        cierres = [float(vela[4]) for vela in datos]
+        aperturas = [float(vela[1]) for vela in datos]
+        altos = [float(vela[2]) for vela in datos]
+        bajos = [float(vela[3]) for vela in datos]
+        volumenes = [float(vela[5]) for vela in datos]
+        precio_actual = cierres[-1]
+        ema_200 = calcular_ema_tradingview(cierres, 200)
+        if not ema_200:
+            continue
+
+        fuerzas, detalle = evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos)
+        cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100 if len(cierres) >= 2 else 0.0
+        cambio_3 = ((cierres[-1] - cierres[-3]) / cierres[-3]) * 100 if len(cierres) >= 3 else 0.0
+
+        if precio_actual > ema_200 and (cambio_1 >= -0.1 or cambio_3 >= -0.2):
+            direccion = "COMPRA"
+            stop_loss = min(bajos[-3:]) if len(bajos) >= 3 else precio_actual - 1.0
+            distancia_riesgo = max(precio_actual - stop_loss, 1.0)
+            take_profit = precio_actual + (distancia_riesgo * 2)
+        else:
+            direccion = "VENTA"
+            stop_loss = max(altos[-3:]) if len(altos) >= 3 else precio_actual + 1.0
+            distancia_riesgo = max(stop_loss - precio_actual, 1.0)
+            take_profit = precio_actual - (distancia_riesgo * 2)
+
+        motivo = f"Señal manual de respaldo | cambio_1 {cambio_1:.2f}% | EMA 200 {ema_200:.2f}"
+        mensaje = construir_mensaje_senal(
+            mercado=mercado,
+            direccion=direccion,
+            precio_actual=precio_actual,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            ema_200=ema_200,
+            fuerza=max(fuerzas, 0.0),
+            motivo=motivo,
+            flujo_btc=None,
+            liquidaciones=None,
+            tipo=tipo,
+        )
+        return {
+            "mercado": mercado,
+            "direccion": direccion,
+            "precio_actual": precio_actual,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "ema_200": ema_200,
+            "mensaje": mensaje,
+            "apalancamiento": 20 if mercado["symbol"] == "BTCUSDT" else 10,
+            "interval": interval,
+        }
+    return None
+
+
 def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
-    datos = obtener_datos_binance(mercado["symbol"], mercado["interval"])
-    if not datos:
-        return None
+    intervalos = [mercado.get("interval", "15m")]
+    if mercado.get("symbol") == "SPXUSDT":
+        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"])
 
-    aperturas = [float(vela[1]) for vela in datos]
-    altos = [float(vela[2]) for vela in datos]
-    bajos = [float(vela[3]) for vela in datos]
-    cierres = [float(vela[4]) for vela in datos]
-    volumenes = [float(vela[5]) for vela in datos]
-    precio_actual = cierres[-1]
-    ema_200 = calcular_ema_tradingview(cierres, 200)
-    if not ema_200:
-        return None
+    for interval in intervalos:
+        datos = obtener_datos_binance(mercado["symbol"], interval)
+        if not datos:
+            continue
 
-    idx_ob = -6
-    vela_ob = datos[idx_ob]
-    apertura_ob = float(vela_ob[1])
-    cierre_ob = float(vela_ob[4])
-    low_ob = float(vela_ob[3])
-    high_ob = float(vela_ob[2])
+        aperturas = [float(vela[1]) for vela in datos]
+        altos = [float(vela[2]) for vela in datos]
+        bajos = [float(vela[3]) for vela in datos]
+        cierres = [float(vela[4]) for vela in datos]
+        volumenes = [float(vela[5]) for vela in datos]
+        precio_actual = cierres[-1]
+        ema_200 = calcular_ema_tradingview(cierres, 200)
+        if not ema_200:
+            continue
 
-    fuerza, detalle = evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos)
-    nivel_noticias, motivo = evaluar_noticias_alto_impacto(hora_actual)
-    umbral_fuerza = 1.6 if nivel_noticias == "alto" else 0.8
+        idx_ob = -6
+        vela_ob = datos[idx_ob]
+        apertura_ob = float(vela_ob[1])
+        cierre_ob = float(vela_ob[4])
+        low_ob = float(vela_ob[3])
+        high_ob = float(vela_ob[2])
 
-    flujo_btc = None
-    liquidaciones = None
-    if mercado["symbol"] == "BTCUSDT":
-        datos_futuros = obtener_datos_binance_futuros(mercado["symbol"], mercado["interval"], 210)
-        ticker_24h = obtener_ticker_24h(mercado["symbol"])
-        funding_rate = obtener_funding_rate(mercado["symbol"])
-        if datos_futuros:
-            cierres_futuros = [float(vela[4]) for vela in datos_futuros]
-            volumenes_futuros = [float(vela[5]) for vela in datos_futuros]
-            flujo_btc = evaluar_flujo_capital(precio_actual, ema_200, cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
-            liquidaciones = detectar_liquidaciones_masivas(cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
+        fuerza, detalle = evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos)
+        impulso_fuerte = evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_actual, ema_200)
+        nivel_noticias, motivo = evaluar_noticias_alto_impacto(hora_actual)
+        umbral_fuerza = 1.6 if nivel_noticias == "alto" else 0.8
 
-    bullish_ob = cierre_ob < apertura_ob
-    bearish_ob = cierre_ob > apertura_ob
-    ultimas_5 = list(range(-5, 0))
-    bullish_sequence = all(cierres[i] > aperturas[i] for i in ultimas_5)
-    bearish_sequence = all(cierres[i] < aperturas[i] for i in ultimas_5)
-    absmove = (abs(cierre_ob - precio_actual) / cierre_ob) * 100
-    relmove = absmove >= 0.5
+        flujo_btc = None
+        liquidaciones = None
+        if mercado["symbol"] == "BTCUSDT":
+            datos_futuros = obtener_datos_binance_futuros(mercado["symbol"], interval, 210)
+            ticker_24h = obtener_ticker_24h(mercado["symbol"])
+            funding_rate = obtener_funding_rate(mercado["symbol"])
+            if datos_futuros:
+                cierres_futuros = [float(vela[4]) for vela in datos_futuros]
+                volumenes_futuros = [float(vela[5]) for vela in datos_futuros]
+                flujo_btc = evaluar_flujo_capital(precio_actual, ema_200, cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
+                liquidaciones = detectar_liquidaciones_masivas(cierres_futuros, volumenes_futuros, ticker_24h, funding_rate)
 
-    condicion_compra = (
-        (bullish_ob and bullish_sequence and relmove and precio_actual > ema_200 and fuerza >= umbral_fuerza)
-        or (precio_actual > ema_200 and flujo_btc and flujo_btc["direccion"] == "COMPRA" and flujo_btc["confianza"] >= 1.5)
-    )
-    condicion_venta = (
-        (bearish_ob and bearish_sequence and relmove and precio_actual < ema_200 and fuerza >= umbral_fuerza)
-        or (precio_actual < ema_200 and flujo_btc and flujo_btc["direccion"] == "VENTA" and flujo_btc["confianza"] >= 1.5)
-    )
+        bullish_ob = cierre_ob < apertura_ob
+        bearish_ob = cierre_ob > apertura_ob
+        ultimas_5 = list(range(-5, 0))
+        bullish_sequence = all(cierres[i] > aperturas[i] for i in ultimas_5)
+        bearish_sequence = all(cierres[i] < aperturas[i] for i in ultimas_5)
+        absmove = (abs(cierre_ob - precio_actual) / cierre_ob) * 100
+        relmove = absmove >= 0.5
 
-    if condicion_compra:
-        direccion = "COMPRA"
-        stop_loss = low_ob if low_ob < precio_actual else precio_actual - 200.0
-        distancia_riesgo = precio_actual - stop_loss
-        take_profit = precio_actual + (distancia_riesgo * 2)
-    elif condicion_venta:
-        direccion = "VENTA"
-        stop_loss = high_ob if high_ob > precio_actual else precio_actual + 200.0
-        distancia_riesgo = stop_loss - precio_actual
-        take_profit = precio_actual - (distancia_riesgo * 2)
-    else:
-        direccion = "COMPRA" if precio_actual > ema_200 else "VENTA"
-        stop_loss = precio_actual - 200.0 if direccion == "COMPRA" else precio_actual + 200.0
-        take_profit = precio_actual + 400.0 if direccion == "COMPRA" else precio_actual - 400.0
+        condicion_compra = (
+            (bullish_ob and bullish_sequence and relmove and precio_actual > ema_200 and fuerza >= umbral_fuerza)
+            or (precio_actual > ema_200 and flujo_btc and flujo_btc["direccion"] == "COMPRA" and flujo_btc["confianza"] >= 1.5)
+            or (impulso_fuerte["detectado"] and impulso_fuerte["direccion"] == "COMPRA")
+        )
+        condicion_venta = (
+            (bearish_ob and bearish_sequence and relmove and precio_actual < ema_200 and fuerza >= umbral_fuerza)
+            or (precio_actual < ema_200 and flujo_btc and flujo_btc["direccion"] == "VENTA" and flujo_btc["confianza"] >= 1.5)
+            or (impulso_fuerte["detectado"] and impulso_fuerte["direccion"] == "VENTA")
+        )
 
-    mensaje = construir_mensaje_senal(
-        mercado=mercado,
-        direccion=direccion,
-        precio_actual=precio_actual,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        ema_200=ema_200,
-        fuerza=fuerza,
-        motivo=motivo,
-        flujo_btc=flujo_btc,
-        liquidaciones=liquidaciones,
-        tipo=tipo,
-    )
-    return {
-        "mercado": mercado,
-        "direccion": direccion,
-        "precio_actual": precio_actual,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "ema_200": ema_200,
-        "mensaje": mensaje,
-        "apalancamiento": 20 if mercado["symbol"] == "BTCUSDT" else 10,
-    }
+        if condicion_compra:
+            direccion = "COMPRA"
+            stop_loss = low_ob if low_ob < precio_actual else precio_actual - 200.0
+            distancia_riesgo = precio_actual - stop_loss
+            take_profit = precio_actual + (distancia_riesgo * 2)
+        elif condicion_venta:
+            direccion = "VENTA"
+            stop_loss = high_ob if high_ob > precio_actual else precio_actual + 200.0
+            distancia_riesgo = stop_loss - precio_actual
+            take_profit = precio_actual - (distancia_riesgo * 2)
+        else:
+            continue
+
+        mensaje = construir_mensaje_senal(
+            mercado=mercado,
+            direccion=direccion,
+            precio_actual=precio_actual,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            ema_200=ema_200,
+            fuerza=fuerza,
+            motivo=motivo,
+            flujo_btc=flujo_btc,
+            liquidaciones=liquidaciones,
+            tipo=tipo,
+        )
+        return {
+            "mercado": mercado,
+            "direccion": direccion,
+            "precio_actual": precio_actual,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "ema_200": ema_200,
+            "mensaje": mensaje,
+            "apalancamiento": 20 if mercado["symbol"] == "BTCUSDT" else 10,
+            "interval": interval,
+        }
+    return None
 
 
 def registrar_senal_emitida(mercado, direccion, precio_actual, stop_loss, take_profit, apalancamiento, tipo="auto"):
@@ -510,44 +664,55 @@ def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
 
 
 def enviar_boton_solicitud(chat_id=None):
-    markup = {"inline_keyboard": [[{"text": "Solicitar señal ahora", "callback_data": "senal_ahora"}]]}
     mensaje = (
         "🦈 *CLUB MARKETSHARKS*\n\n"
-        "Pulse el botón para solicitar una señal instantánea con dirección, SL, TP y apalancamiento recomendado.\n\n"
-        "⚠️ Aviso importante: esta señal manual NO sustituye la estrategia principal del canal.\n"
-        "Cada miembro del canal privado solo puede solicitar 1 señal manual por día.\n"
+        "Elija el mercado para solicitar una señal manual instantánea o controla las señales automáticas.\n\n"
+        "⚠️ Aviso importante: la señal manual NO sustituye la estrategia principal del canal.\n"
+        "Los administradores del canal pueden pedir más de 1 señal manual al día.\n"
+        "Los miembros normales solo pueden solicitar 1 señal manual por día.\n"
         "La señal manual se asume bajo su propio riesgo y no tiene por qué coincidir con la estrategia principal del bot.\n\n"
-        "Si el botón no responde, escribe /senalahora en este chat para pedirla manualmente."
+        "Usa los botones para activar o desactivar el envío automático de señales según la estrategia."
     )
-    enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=markup)
+    enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=construir_markup_control_auto())
 
 
-def generar_senal_manual(chat_id=None):
+def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=None):
     global SOLICITUDES_MANUALES
     limpiar_solicitudes_si_es_necesario()
     if not chat_id:
         return False
 
     hoy = hora_espana().strftime("%Y-%m-%d")
-    estado = SOLICITUDES_MANUALES.get(chat_id)
-    if estado and estado.get("fecha") == hoy and estado.get("usado"):
-        mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
-        enviar_senal_telegram(mensaje, chat_id=chat_id)
-        return False
-
-    SOLICITUDES_MANUALES[chat_id] = {"fecha": hoy, "usado": True}
-
-    mensaje_espera = "🧠 *CLUB MARKETSHARKS*\n\nEl bot está estudiando la mejor señal para ti. Recibirás la señal en 1 minuto."
-    enviar_senal_telegram(mensaje_espera, chat_id=chat_id)
-
-    time.sleep(60)
+    identificador = requester_id or chat_id
+    if not es_admin_del_canal(identificador):
+        estado = SOLICITUDES_MANUALES.get(identificador)
+        if estado and estado.get("fecha") == hoy and estado.get("usado"):
+            mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
+            enviar_senal_telegram(mensaje, chat_id=chat_id)
+            return False
+        SOLICITUDES_MANUALES[identificador] = {"fecha": hoy, "usado": True}
 
     hora_actual = hora_espana()
-    for mercado in CONFIGURACIONES_MERCADO:
+    mercados = CONFIGURACIONES_MERCADO
+    if mercado_seleccionado == "btc":
+        mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "BTCUSDT"]
+    elif mercado_seleccionado == "spx":
+        mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "SPXUSDT"]
+
+    for mercado in mercados:
         senal = generar_senal_para_mercado(mercado, hora_actual, tipo="manual")
+        if not senal:
+            senal = generar_senal_fallback(mercado, hora_actual, tipo="manual")
         if senal:
             enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
             return True
+
+    for mercado in CONFIGURACIONES_MERCADO:
+        senal = generar_senal_fallback(mercado, hora_actual, tipo="manual")
+        if senal:
+            enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
+            return True
+
     mensaje_error = "⚠️ *CLUB MARKETSHARKS*\n\nNo se pudo generar una señal en este momento. Inténtalo de nuevo más tarde."
     enviar_senal_telegram(mensaje_error, chat_id=chat_id)
     return False
@@ -573,17 +738,51 @@ def telegram_listener():
                 if "message" in update:
                     message = update["message"]
                     chat_id = message.get("chat", {}).get("id")
+                    user_id = message.get("from", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
                     if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal", "!senal", "!senalahora"}:
-                        generar_senal_manual(chat_id=chat_id)
+                        generar_senal_manual(chat_id=chat_id, requester_id=user_id)
+                    if text in {"/senalbtc", "senalbtc", "btcmanual"}:
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
+                    if text in {"/senalspx", "senalspx", "spxmanual"}:
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
+                    if text in {"/auto_on", "activar_auto", "activar automáticas", "activar automaticas", "activarauto"}:
+                        if es_admin_del_canal(user_id):
+                            actualizar_estado_auto(True, chat_id=chat_id, requester_id=user_id)
+                        else:
+                            enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
+                    if text in {"/auto_off", "desactivar_auto", "desactivar automáticas", "desactivar automaticas", "desactivarauto"}:
+                        if es_admin_del_canal(user_id):
+                            actualizar_estado_auto(False, chat_id=chat_id, requester_id=user_id)
+                        else:
+                            enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
                 if "callback_query" in update:
                     callback = update["callback_query"]
                     chat_id = callback.get("message", {}).get("chat", {}).get("id")
+                    user_id = callback.get("from", {}).get("id")
                     data = callback.get("data", "")
-                    if data == "senal_ahora":
-                        answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
-                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal..."}, timeout=10)
-                        generar_senal_manual(chat_id=chat_id)
+                    answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
+                    if data == "senal_btc":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
+                    elif data == "senal_spx":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPX..."}, timeout=10)
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
+                    elif data == "activar_auto":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Activando señales automáticas..."}, timeout=10)
+                        if es_admin_del_canal(user_id):
+                            actualizar_estado_auto(True, chat_id=chat_id, requester_id=user_id)
+                        else:
+                            enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
+                    elif data == "desactivar_auto":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Desactivando señales automáticas..."}, timeout=10)
+                        if es_admin_del_canal(user_id):
+                            actualizar_estado_auto(False, chat_id=chat_id, requester_id=user_id)
+                        else:
+                            enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
+                    elif data == "estado_auto":
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": f"Señales automáticas {estado_auto_texto()}."}, timeout=10)
+                        enviar_senal_telegram(f"🔎 Estado actual: las señales automáticas están {estado_auto_texto()}.", chat_id=chat_id)
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
@@ -613,7 +812,7 @@ def motor_de_trading():
                 time.sleep(60)
                 continue
 
-            if not puede_enviar_senal_automatica():
+            if not puede_enviar_senal_automatica(forzar=not ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] and ESTADO_DIARIO["senales_automaticas_hoy"] < 2):
                 print(f"⏱️ Cooldown activo. Próxima señal automática en {AUTO_SIGNAL_COOLDOWN_SECONDS} segundos.")
                 time.sleep(60)
                 continue
