@@ -935,8 +935,17 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             if requester_id:
                 ok3, status3, _ = enviar_senal_telegram("✅ Señal generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
                 if not ok3 and status3 == 403:
-                    enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}); la señal fue publicada en el canal.", chat_id=chat_id)
+                    enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}); la señal fue publicada en este canal.", chat_id=chat_id)
             return True
+
+    # Si se solicitó un mercado específico, no probamos otros mercados distintos.
+    if mercado_seleccionado in {"btc", "spx", "spcx"}:
+        mensaje_error = (
+            "⚠️ *CLUB MARKETSHARKS*\n\n"
+            "No se pudo generar una señal para el mercado solicitado en este momento. Inténtalo de nuevo más tarde."
+        )
+        enviar_senal_telegram(mensaje_error, chat_id=chat_id)
+        return False
 
     for mercado in CONFIGURACIONES_MERCADO:
         senal = generar_senal_fallback(mercado, hora_actual, tipo="manual")
@@ -946,7 +955,7 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             if requester_id:
                 ok4, status4, _ = enviar_senal_telegram("✅ Señal de respaldo generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
                 if not ok4 and status4 == 403:
-                    enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}); la señal de respaldo fue publicada en el canal.", chat_id=chat_id)
+                    enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}); la señal de respaldo fue publicada en este canal.", chat_id=chat_id)
             return True
 
     mensaje_error = "⚠️ *CLUB MARKETSHARKS*\n\nNo se pudo generar una señal en este momento. Inténtalo de nuevo más tarde."
