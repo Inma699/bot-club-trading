@@ -19,7 +19,7 @@ CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
     {"symbol": "BTCUSDT", "interval": "15m", "nombre": "BTCUSDT (15m)"},
-    {"symbol": "SPXUSDT", "interval": "15m", "nombre": "SPXUSDT (15m/1h)", "fallback_intervals": ["1h"], "aliases": ["SPXUSDT"]},
+    {"symbol": "SPCXUSDT", "interval": "15m", "nombre": "SPCXUSDT (Bitget 15m/1h)", "fallback_intervals": ["1h"], "aliases": ["SPCXUSDT"]},
 ]
 
 # === ESTADÍSTICAS DIARIAS ===
@@ -161,14 +161,78 @@ def evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_a
     return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Sin impulso fuerte"}
 
 
+def obtener_datos_bitget(symbol, interval, limit=210):
+    """Intento robusto de obtener velas (klines/candles) desde Bitget para SPCXUSDT.
+    Prueba varios endpoints y variantes de parámetros hasta obtener una lista de velas.
+    """
+    # Normalizar symbol
+    sym_upper = str(symbol).upper()
+    sym_lower = str(symbol).lower()
+
+    # Variantes de periodo comunes que usan diferentes APIs
+    period_variants = [interval, interval.replace('m', 'min'), interval.replace('m', ''), interval]
+
+    endpoints = [
+        ("https://api.bitget.com/api/mix/v1/market/candles", {}),
+        ("https://api.bitget.com/api/spot/v1/market/candles", {}),
+        ("https://api.bitget.com/api/mix/v1/market/ticker", {}),
+        ("https://api.bitget.com/api/spot/v1/market/ticker", {}),
+        ("https://api.bitget.com/api/spot/v1/market/tickers", {}),
+    ]
+
+    param_names = [
+        ("symbol", "period", "size"),
+        ("symbol", "period", "limit"),
+        ("symbol", "granularity", "size"),
+        ("symbol", "period", "count"),
+    ]
+
+    for url, _ in endpoints:
+        for period in period_variants:
+            for names in param_names:
+                params = {}
+                params[names[0]] = sym_upper if 'mix' in url else sym_lower
+                params[names[1]] = period
+                params[names[2]] = limit
+                try:
+                    r = requests.get(url, params=params, timeout=10)
+                    if r.status_code != 200:
+                        continue
+                    try:
+                        data = r.json()
+                    except Exception:
+                        # Fallback: try to parse raw text as JSON array
+                        txt = r.text.strip()
+                        if txt.startswith('['):
+                            import json
+                            return json.loads(txt)
+                        continue
+
+                    # Normalizar diferentes formatos de respuesta de Bitget
+                    if isinstance(data, list):
+                        return data
+                    if isinstance(data, dict):
+                        for key in ("data", "candles", "result", "ticker", "tickers"):
+                            if key in data and isinstance(data[key], list):
+                                return data[key]
+                    # Si no encontramos formato, continúe probando
+                except Exception as e:
+                    # imprimir para debug pero seguir intentando
+                    print(f"⚠️ Error consultando Bitget {url} con params {params}: {e}")
+    print("⚠️ No se pudo obtener velas desde Bitget para", symbol)
+    return None
+
+
 def obtener_datos_binance(symbol, interval, limit=210):
+    # If this is the Bitget SPCX perpetual, route to Bitget data provider
+    if str(symbol).upper() == "SPCXUSDT":
+        return obtener_datos_bitget(symbol, interval, limit=limit)
+
     urls = [
         ("https://api.binance.com/api/v3/klines", {}),
         ("https://api.binance.us/api/v3/klines", {}),
     ]
     symbols = [symbol]
-    if symbol == "SPXUSDT":
-        symbols.extend(["SPXUSDT"])
     for candidate_symbol in symbols:
         params = {"symbol": candidate_symbol, "interval": interval, "limit": limit}
         for url, extra_params in urls:
@@ -442,8 +506,8 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
 
 def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
     intervalos = [mercado.get("interval", "15m")]
-    if mercado.get("symbol") == "SPXUSDT":
-        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"])
+    if mercado.get("symbol") == "SPCXUSDT":
+        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"]) 
 
     for interval in intervalos:
         datos = obtener_datos_binance(mercado["symbol"], interval)
@@ -505,8 +569,8 @@ def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
 
 def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
     intervalos = [mercado.get("interval", "15m")]
-    if mercado.get("symbol") == "SPXUSDT":
-        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"])
+    if mercado.get("symbol") == "SPCXUSDT":
+        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"]) 
 
     for interval in intervalos:
         datos = obtener_datos_binance(mercado["symbol"], interval)
