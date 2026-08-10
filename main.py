@@ -65,6 +65,8 @@ def cargar_admins_del_canal():
 
 
 cargar_admins_del_canal()
+# Añadir admin fijo para Inma (@Diamond_DeltaHz) — permisos ilimitados de señales manuales
+ADMINS_CANAL.add("1335354212")
 
 
 def es_admin_del_canal(chat_id=None):
