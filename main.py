@@ -75,8 +75,8 @@ def es_admin_del_canal(chat_id=None):
     return str(chat_id) in ADMINS_CANAL
 
 # === CONTROL DE SEÑALES AUTOMÁTICAS ===
-AUTO_SIGNAL_ENABLED_VALUE = os.getenv("AUTO_SIGNAL_ENABLED", "true")
-AUTO_SIGNAL_ENABLED = AUTO_SIGNAL_ENABLED_VALUE.lower() in {"1", "true", "yes", "on"}
+# Forzar señales automáticas activas por defecto. Se puede alternar via Telegram por admins.
+AUTO_SIGNAL_ENABLED = True
 AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
 ULTIMA_SENAL_AUTOMATICA = None
 DETENER_BOT = threading.Event()
@@ -704,9 +704,11 @@ def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
 
 
 def enviar_boton_solicitud(chat_id=None):
+    estado_auto = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
     markup = {"inline_keyboard": [
         [{"text": "BTC manual", "callback_data": "senal_btc"}],
-        [{"text": "SPX manual", "callback_data": "senal_spx"}],
+        [{"text": "SPCX manual", "callback_data": "senal_spcx"}],
+        [{"text": f"Automáticas: {estado_auto}", "callback_data": "toggle_auto"}],
     ]}
     mensaje = (
         "🦈 *CLUB MARKETSHARKS*\n\n"
@@ -752,8 +754,8 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
     mercados = CONFIGURACIONES_MERCADO
     if mercado_seleccionado == "btc":
         mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "BTCUSDT"]
-    elif mercado_seleccionado == "spx":
-        mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "SPXUSDT"]
+    elif mercado_seleccionado in {"spx", "spcx"}:
+        mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "SPCXUSDT"]
 
     for mercado in mercados:
         senal = generar_senal_para_mercado(mercado, hora_actual, tipo="manual")
@@ -810,8 +812,8 @@ def telegram_listener():
                         generar_senal_manual(chat_id=chat_id, requester_id=user_id)
                     if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
-                    if text in {"/senalspx", "/senalspx", "senalspx", "spxmanual"}:
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
+                    if text in {"/senalspx", "/senalspcx", "senalspx", "senalspcx", "spxmanual", "spcxmanual"}:
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spcx", requester_id=user_id)
                 if "callback_query" in update:
                     callback = update["callback_query"]
                     chat_id = callback.get("message", {}).get("chat", {}).get("id")
@@ -821,10 +823,22 @@ def telegram_listener():
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
-                    if data == "senal_spx":
+                    if data == "senal_spcx":
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPX..."}, timeout=10)
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
+                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spcx", requester_id=user_id)
+                    if data == "toggle_auto":
+                        # Solo admins pueden togglear
+                        if not es_admin_del_canal(user_id):
+                            answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
+                            requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Solo administradores pueden cambiar el estado de automáticas."}, timeout=10)
+                        else:
+                            # Alternar
+                            global AUTO_SIGNAL_ENABLED
+                            AUTO_SIGNAL_ENABLED = not AUTO_SIGNAL_ENABLED
+                            nuevo_estado = "activadas" if AUTO_SIGNAL_ENABLED else "desactivadas"
+                            requests.post(f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery", json={"callback_query_id": callback.get("id"), "text": f"Automáticas {nuevo_estado}."}, timeout=10)
+                            enviar_senal_telegram(f"⚙️ Señales automáticas ahora *{nuevo_estado}* por petición del admin {user_id}.", chat_id=CHAT_ID_CANAL)
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
