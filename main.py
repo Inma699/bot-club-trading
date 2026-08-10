@@ -686,7 +686,7 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
 
     hoy = hora_espana().strftime("%Y-%m-%d")
     identificador = requester_id or chat_id
-    if not es_admin_del_canal(identificador):
+    if not es_admin_del_canal(chat_id=chat_id, user_id=requester_id):
         estado = SOLICITUDES_MANUALES.get(identificador)
         if estado and estado.get("fecha") == hoy and estado.get("usado"):
             mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
