@@ -48,6 +48,7 @@ ESTADO_DIARIO = {
 # === CONTROL DE SOLICITUDES MANUALES ===
 SOLICITUDES_MANUALES = {}
 ADMINS_CANAL = set()
+ADMIN_UNLIMITED_MANUALS = {"1335354212"}
 
 
 def cargar_admins_del_canal():
@@ -61,6 +62,7 @@ def cargar_admins_del_canal():
                 ids.add(valor)
     if CHAT_ID_CANAL:
         ids.add(CHAT_ID_CANAL)
+    ids.update(ADMIN_UNLIMITED_MANUALS)
     ADMINS_CANAL = {str(item) for item in ids}
 
 
@@ -186,6 +188,7 @@ def obtener_datos_binance_futuros(symbol, interval, limit=210):
     urls = [
         ("https://fapi.binance.com/fapi/v1/klines", {}),
         ("https://fstream.binance.com/fapi/v1/klines", {}),
+        ("https://api.binance.us/fapi/v1/klines", {}),
     ]
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     for url, extra_params in urls:
@@ -218,6 +221,7 @@ def obtener_funding_rate(symbol):
     urls = [
         ("https://fapi.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
         ("https://fstream.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
+        ("https://api.binance.us/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
     ]
     for url, params in urls:
         try:
