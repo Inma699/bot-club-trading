@@ -67,10 +67,12 @@ def cargar_admins_del_canal():
 cargar_admins_del_canal()
 
 
-def es_admin_del_canal(chat_id=None):
-    if not chat_id:
-        return False
-    return str(chat_id) in ADMINS_CANAL
+def es_admin_del_canal(chat_id=None, user_id=None):
+    if chat_id and str(chat_id) in ADMINS_CANAL:
+        return True
+    if user_id and str(user_id) in ADMINS_CANAL:
+        return True
+    return False
 
 # === CONTROL DE SEÑALES AUTOMÁTICAS ===
 AUTO_SIGNAL_ENABLED_VALUE = os.getenv("AUTO_SIGNAL_ENABLED", "true")
@@ -747,12 +749,12 @@ def telegram_listener():
                     if text in {"/senalspx", "senalspx", "spxmanual"}:
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
                     if text in {"/auto_on", "activar_auto", "activar automáticas", "activar automaticas", "activarauto"}:
-                        if es_admin_del_canal(user_id):
+                        if es_admin_del_canal(chat_id=chat_id, user_id=user_id):
                             actualizar_estado_auto(True, chat_id=chat_id, requester_id=user_id)
                         else:
                             enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
                     if text in {"/auto_off", "desactivar_auto", "desactivar automáticas", "desactivar automaticas", "desactivarauto"}:
-                        if es_admin_del_canal(user_id):
+                        if es_admin_del_canal(chat_id=chat_id, user_id=user_id):
                             actualizar_estado_auto(False, chat_id=chat_id, requester_id=user_id)
                         else:
                             enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
@@ -770,13 +772,13 @@ def telegram_listener():
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spx", requester_id=user_id)
                     elif data == "activar_auto":
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Activando señales automáticas..."}, timeout=10)
-                        if es_admin_del_canal(user_id):
+                        if es_admin_del_canal(chat_id=chat_id, user_id=user_id):
                             actualizar_estado_auto(True, chat_id=chat_id, requester_id=user_id)
                         else:
                             enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
                     elif data == "desactivar_auto":
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Desactivando señales automáticas..."}, timeout=10)
-                        if es_admin_del_canal(user_id):
+                        if es_admin_del_canal(chat_id=chat_id, user_id=user_id):
                             actualizar_estado_auto(False, chat_id=chat_id, requester_id=user_id)
                         else:
                             enviar_senal_telegram("⚠️ No tienes permisos para activar/desactivar señales automáticas.", chat_id=chat_id)
