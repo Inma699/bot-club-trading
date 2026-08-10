@@ -163,64 +163,199 @@ def evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_a
 
 def obtener_datos_bitget(symbol, interval, limit=210):
     """Intento robusto de obtener velas (klines/candles) desde Bitget para SPCXUSDT.
-    Prueba varios endpoints y variantes de parámetros hasta obtener una lista de velas.
+    Prioriza rutas modernas de Bitget y evita la API v1 deprecada.
     """
-    # Normalizar symbol
     sym_upper = str(symbol).upper()
-    sym_lower = str(symbol).lower()
 
-    # Variantes de periodo comunes que usan diferentes APIs
-    period_variants = [interval, interval.replace('m', 'min'), interval.replace('m', ''), interval]
+    if interval.endswith('m'):
+        try:
+            granularity = str(int(interval[:-1]) * 60)
+        except ValueError:
+            granularity = interval
+    elif interval.endswith('h'):
+        try:
+            granularity = str(int(interval[:-1]) * 3600)
+        except ValueError:
+            granularity = interval
+    else:
+        granularity = interval
 
     endpoints = [
-        ("https://api.bitget.com/api/mix/v1/market/candles", {}),
-        ("https://api.bitget.com/api/spot/v1/market/candles", {}),
-        ("https://api.bitget.com/api/mix/v1/market/ticker", {}),
-        ("https://api.bitget.com/api/spot/v1/market/ticker", {}),
-        ("https://api.bitget.com/api/spot/v1/market/tickers", {}),
+        ("https://api.bitget.com/api/spot/v3/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://api.bitget.com/api/spot/v2/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://api.bitget.com/api/spot/v3/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://api.bitget.com/api/spot/v2/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
     ]
 
-    param_names = [
-        ("symbol", "period", "size"),
-        ("symbol", "period", "limit"),
-        ("symbol", "granularity", "size"),
-        ("symbol", "period", "count"),
-    ]
+    for url, params in endpoints:
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code != 200:
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                txt = r.text.strip()
+                if txt.startswith('['):
+                    import json
+                    return json.loads(txt)
+                continue
 
-    for url, _ in endpoints:
-        for period in period_variants:
-            for names in param_names:
-                params = {}
-                params[names[0]] = sym_upper if 'mix' in url else sym_lower
-                params[names[1]] = period
-                params[names[2]] = limit
-                try:
-                    r = requests.get(url, params=params, timeout=10)
-                    if r.status_code != 200:
+            if isinstance(data, dict):
+                code = str(data.get("code", "")).strip().lower()
+                if code and code not in {"0", "000", "00000", "ok", "success", "200"}:
+                    if code == "30032":
                         continue
-                    try:
-                        data = r.json()
-                    except Exception:
-                        # Fallback: try to parse raw text as JSON array
-                        txt = r.text.strip()
-                        if txt.startswith('['):
-                            import json
-                            return json.loads(txt)
-                        continue
-
-                    # Normalizar diferentes formatos de respuesta de Bitget
-                    if isinstance(data, list):
-                        return data
-                    if isinstance(data, dict):
-                        for key in ("data", "candles", "result", "ticker", "tickers"):
-                            if key in data and isinstance(data[key], list):
-                                return data[key]
-                    # Si no encontramos formato, continúe probando
-                except Exception as e:
-                    # imprimir para debug pero seguir intentando
-                    print(f"⚠️ Error consultando Bitget {url} con params {params}: {e}")
+                    continue
+                if "data" in data:
+                    inner = data["data"]
+                    if isinstance(inner, list):
+                        return inner
+                    if isinstance(inner, dict):
+                        if "candles" in inner and isinstance(inner["candles"], list):
+                            return inner["candles"]
+                if "candles" in data and isinstance(data["candles"], list):
+                    return data["candles"]
+                if isinstance(data, list):
+                    return data
+            elif isinstance(data, list):
+                return data
+        except Exception as e:
+            print(f"⚠️ Error consultando Bitget {url} con params {params}: {e}")
     print("⚠️ No se pudo obtener velas desde Bitget para", symbol)
     return None
+
+
+def obtener_precio_bitget_v2(symbol):
+    """Obtiene el precio actual de SPCXUSDT usando endpoints modernos de Bitget."""
+    symbol_upper = str(symbol).upper()
+    endpoints = [
+        ("https://api.bitget.com/api/spot/v3/market/ticker", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v3/market/tickers", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v2/market/ticker", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v2/market/tickers", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v3/market/candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+        ("https://api.bitget.com/api/spot/v2/market/candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+        ("https://api.bitget.com/api/spot/v3/market/history-candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+        ("https://api.bitget.com/api/spot/v2/market/history-candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+    ]
+
+    for url, params in endpoints:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if isinstance(data, dict):
+                code = str(data.get("code", "")).strip().lower()
+                if code and code not in {"0", "000", "00000", "ok", "success", "200"}:
+                    continue
+
+                inner = data.get("data", data)
+                if isinstance(inner, dict):
+                    for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
+                        if key in inner:
+                            return float(inner[key])
+                    if "ticker" in inner and isinstance(inner["ticker"], dict):
+                        for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
+                            if key in inner["ticker"]:
+                                return float(inner["ticker"][key])
+                if isinstance(inner, list) and len(inner) > 0:
+                    cand = inner[0]
+                    if isinstance(cand, (list, tuple)) and len(cand) >= 5:
+                        return float(cand[4])
+                    if isinstance(cand, dict):
+                        for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
+                            if key in cand:
+                                return float(cand[key])
+            elif isinstance(data, list) and len(data) > 0:
+                cand = data[0]
+                if isinstance(cand, (list, tuple)) and len(cand) >= 5:
+                    return float(cand[4])
+        except Exception as e:
+            print(f"⚠️ Error consultando precio Bitget V2/V3 en {url}: {e}")
+    return None
+
+
+def buscar_id_coingecko_por_simbolo(symbol):
+    try:
+        response = requests.get("https://api.coingecko.com/api/v3/search", params={"query": symbol}, timeout=10)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if not isinstance(data, dict):
+            return None
+        coins = data.get("coins", [])
+        for coin in coins:
+            if str(coin.get("symbol", "")).lower() == str(symbol).lower():
+                return coin.get("id")
+        if coins:
+            return coins[0].get("id")
+    except Exception as e:
+        print(f"⚠️ Error buscando SPCX en CoinGecko: {e}")
+    return None
+
+
+def obtener_precio_alternativa_spcx():
+    """Fallback general para SPCX usando CoinGecko y, si es necesario, Binance."""
+    candidates = ["spcx"]
+    for coin_id in candidates:
+        try:
+            response = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": coin_id, "vs_currencies": "usdt,usd"},
+                timeout=10,
+            )
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if not isinstance(data, dict):
+                continue
+            coin_data = data.get(coin_id, {})
+            for currency in ("usdt", "usd"):
+                if coin_data.get(currency) is not None:
+                    return float(coin_data[currency])
+        except Exception as e:
+            print(f"⚠️ Error consultando CoinGecko para SPCX: {e}")
+
+    coin_id = buscar_id_coingecko_por_simbolo("SPCX")
+    if coin_id:
+        try:
+            response = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": coin_id, "vs_currencies": "usdt,usd"},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                coin_data = data.get(coin_id, {})
+                for currency in ("usdt", "usd"):
+                    if coin_data.get(currency) is not None:
+                        return float(coin_data[currency])
+        except Exception as e:
+            print(f"⚠️ Error consultando CoinGecko con id {coin_id}: {e}")
+
+    for url, params in [
+        ("https://api.binance.com/api/v3/ticker/price", {"symbol": "SPCXUSDT"}),
+        ("https://api.binance.us/api/v3/ticker/price", {"symbol": "SPCXUSDT"}),
+    ]:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and data.get("price") is not None:
+                    return float(data["price"])
+        except Exception as e:
+            print(f"⚠️ Error consultando fallback Binance para SPCX: {e}")
+
+    return None
+
+
+def obtener_precio_spcx():
+    precio = obtener_precio_bitget_v2('SPCXUSDT')
+    if precio is not None:
+        return precio
+    return obtener_precio_alternativa_spcx()
 
 
 def obtener_datos_binance(symbol, interval, limit=210):
@@ -564,6 +699,39 @@ def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
             "apalancamiento": 20 if mercado["symbol"] == "BTCUSDT" else 10,
             "interval": interval,
         }
+
+    if mercado["symbol"] == "SPCXUSDT":
+        precio_directo = obtener_precio_spcx()
+        if precio_directo is not None:
+            stop_loss = max(precio_directo * 0.98, precio_directo - 1.0)
+            distancia_riesgo = max(precio_directo - stop_loss, 1.0)
+            take_profit = precio_directo + (distancia_riesgo * 2)
+            motivo = "Señal manual de respaldo para SPCX usando precio directo de Bitget/alternativa externa."
+            mensaje = construir_mensaje_senal(
+                mercado=mercado,
+                direccion="COMPRA",
+                precio_actual=precio_directo,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                ema_200=precio_directo,
+                fuerza=0.0,
+                motivo=motivo,
+                flujo_btc=None,
+                liquidaciones=None,
+                tipo=tipo,
+            )
+            return {
+                "mercado": mercado,
+                "direccion": "COMPRA",
+                "precio_actual": precio_directo,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "ema_200": precio_directo,
+                "mensaje": mensaje,
+                "apalancamiento": 10,
+                "interval": mercado.get("interval", "15m"),
+            }
+
     return None
 
 
@@ -825,7 +993,7 @@ def telegram_listener():
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
                     if data == "senal_spcx":
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
-                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPX..."}, timeout=10)
+                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPCX..."}, timeout=10)
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spcx", requester_id=user_id)
                     if data == "toggle_auto":
                         # Solo admins pueden togglear
