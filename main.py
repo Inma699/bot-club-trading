@@ -383,9 +383,13 @@ def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
+        print(f"➡️ Enviando mensaje a Telegram chat={target_chat} payload_len={len(mensaje)}")
         response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        print("✅ Señal enviada a Telegram")
+        try:
+            response.raise_for_status()
+            print(f"✅ Señal enviada a Telegram al chat {target_chat}")
+        except Exception:
+            print(f"⚠️ Telegram devolvió status {response.status_code} al enviar a {target_chat}: {response.text}")
     except Exception as e:
         print(f"⚠️ Error enviando señal a Telegram: {e}")
 
@@ -653,14 +657,24 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
     limpiar_solicitudes_si_es_necesario()
     if not chat_id:
         return False
-
     hoy = hora_espana().strftime("%Y-%m-%d")
     identificador = requester_id or chat_id
+    print(f"📨 Solicitud manual recibida. chat_id={chat_id} requester_id={requester_id} identificador={identificador}")
+
+    # confirmar recepción al solicitante (si conocemos requester_id)
+    if requester_id:
+        try:
+            enviar_senal_telegram("📨 Recibida tu solicitud, generando señal...", chat_id=requester_id)
+        except Exception:
+            print(f"⚠️ No se pudo enviar confirmación al requester {requester_id}")
+
     if not es_admin_del_canal(identificador):
         estado = SOLICITUDES_MANUALES.get(identificador)
         if estado and estado.get("fecha") == hoy and estado.get("usado"):
             mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
             enviar_senal_telegram(mensaje, chat_id=chat_id)
+            if requester_id:
+                enviar_senal_telegram("⚠️ Tu solicitud fue rechazada: ya usaste la de hoy.", chat_id=requester_id)
             return False
         SOLICITUDES_MANUALES[identificador] = {"fecha": hoy, "usado": True}
 
@@ -677,12 +691,18 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             senal = generar_senal_fallback(mercado, hora_actual, tipo="manual")
         if senal:
             enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
+            print(f"✅ Señal generada y enviada. destino_chat={chat_id} remitente={requester_id}")
+            if requester_id:
+                enviar_senal_telegram("✅ Señal generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
             return True
 
     for mercado in CONFIGURACIONES_MERCADO:
         senal = generar_senal_fallback(mercado, hora_actual, tipo="manual")
         if senal:
             enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
+            print(f"✅ Señal fallback generada y enviada. destino_chat={chat_id} remitente={requester_id}")
+            if requester_id:
+                enviar_senal_telegram("✅ Señal de respaldo generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
             return True
 
     mensaje_error = "⚠️ *CLUB MARKETSHARKS*\n\nNo se pudo generar una señal en este momento. Inténtalo de nuevo más tarde."
