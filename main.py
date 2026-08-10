@@ -379,7 +379,8 @@ def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
         return
 
     url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
-    payload = {"chat_id": target_chat, "text": mensaje, "parse_mode": "Markdown"}
+    # Enviar como texto plano para evitar errores de parseo de entidades
+    payload = {"chat_id": target_chat, "text": mensaje}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
@@ -388,10 +389,13 @@ def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
         try:
             response.raise_for_status()
             print(f"✅ Señal enviada a Telegram al chat {target_chat}")
+            return True, response.status_code, response.text
         except Exception:
             print(f"⚠️ Telegram devolvió status {response.status_code} al enviar a {target_chat}: {response.text}")
+            return False, response.status_code, response.text
     except Exception as e:
         print(f"⚠️ Error enviando señal a Telegram: {e}")
+        return False, None, str(e)
 
 
 def enviar_resumen_diario():
@@ -663,10 +667,10 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
 
     # confirmar recepción al solicitante (si conocemos requester_id)
     if requester_id:
-        try:
-            enviar_senal_telegram("📨 Recibida tu solicitud, generando señal...", chat_id=requester_id)
-        except Exception:
-            print(f"⚠️ No se pudo enviar confirmación al requester {requester_id}")
+        ok, status, text = enviar_senal_telegram("📨 Recibida tu solicitud, generando señal...", chat_id=requester_id)
+        if not ok and status == 403:
+            print(f"⚠️ No se puede DM al requester {requester_id} (403). Notificando en canal.")
+            enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}). La señal se publicará en este canal.", chat_id=chat_id)
 
     if not es_admin_del_canal(identificador):
         estado = SOLICITUDES_MANUALES.get(identificador)
@@ -674,7 +678,9 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             mensaje = "🧠 *CLUB MARKETSHARKS*\n\nYa has usado tu solicitud de señal para hoy. Espera a mañana o vuelve a intentarlo más tarde."
             enviar_senal_telegram(mensaje, chat_id=chat_id)
             if requester_id:
-                enviar_senal_telegram("⚠️ Tu solicitud fue rechazada: ya usaste la de hoy.", chat_id=requester_id)
+                ok2, status2, _ = enviar_senal_telegram("⚠️ Tu solicitud fue rechazada: ya usaste la de hoy.", chat_id=requester_id)
+                if not ok2 and status2 == 403:
+                    enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}) sobre la limitación diaria.", chat_id=chat_id)
             return False
         SOLICITUDES_MANUALES[identificador] = {"fecha": hoy, "usado": True}
 
@@ -693,7 +699,9 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
             print(f"✅ Señal generada y enviada. destino_chat={chat_id} remitente={requester_id}")
             if requester_id:
-                enviar_senal_telegram("✅ Señal generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
+                ok3, status3, _ = enviar_senal_telegram("✅ Señal generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
+                if not ok3 and status3 == 403:
+                    enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}); la señal fue publicada en el canal.", chat_id=chat_id)
             return True
 
     for mercado in CONFIGURACIONES_MERCADO:
@@ -702,7 +710,9 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
             print(f"✅ Señal fallback generada y enviada. destino_chat={chat_id} remitente={requester_id}")
             if requester_id:
-                enviar_senal_telegram("✅ Señal de respaldo generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
+                ok4, status4, _ = enviar_senal_telegram("✅ Señal de respaldo generada y enviada. Comprueba el chat donde la solicitaste.", chat_id=requester_id)
+                if not ok4 and status4 == 403:
+                    enviar_senal_telegram(f"⚠️ No pude enviar DM al solicitante (ID {requester_id}); la señal de respaldo fue publicada en el canal.", chat_id=chat_id)
             return True
 
     mensaje_error = "⚠️ *CLUB MARKETSHARKS*\n\nNo se pudo generar una señal en este momento. Inténtalo de nuevo más tarde."
