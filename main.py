@@ -183,17 +183,14 @@ def obtener_datos_bitget(symbol, interval, limit=210):
     endpoints = [
         ("https://api.bitget.com/api/spot/v3/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
         ("https://api.bitget.com/api/spot/v2/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-        ("https://api.bitget.com/api/spot/v1/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
         ("https://api.bitget.com/api/spot/v3/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
         ("https://api.bitget.com/api/spot/v2/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-        ("https://api.bitget.com/api/spot/v1/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
     ]
 
     for url, params in endpoints:
         try:
             r = requests.get(url, params=params, timeout=10)
             if r.status_code != 200:
-                print(f"⚠️ Bitget {url} devolvió estado {r.status_code} para {symbol} {interval}: {r.text[:200]}")
                 continue
             try:
                 data = r.json()
@@ -207,8 +204,6 @@ def obtener_datos_bitget(symbol, interval, limit=210):
             if isinstance(data, dict):
                 code = str(data.get("code", "")).strip().lower()
                 if code and code not in {"0", "000", "00000", "ok", "success", "200"}:
-                    msg = data.get("msg") or data.get("message") or data.get("errorMessage") or ""
-                    print(f"⚠️ Bitget error {code} para {symbol} {interval}: {msg}")
                     if code == "30032":
                         continue
                     continue
@@ -388,7 +383,6 @@ def obtener_datos_binance(symbol, interval, limit=210):
 
 def obtener_datos_binance_futuros(symbol, interval, limit=210):
     urls = [
-        ("https://api.binance.us/fapi/v1/klines", {}),
         ("https://fapi.binance.com/fapi/v1/klines", {}),
         ("https://fstream.binance.com/fapi/v1/klines", {}),
     ]
@@ -421,7 +415,6 @@ def obtener_ticker_24h(symbol):
 
 def obtener_funding_rate(symbol):
     urls = [
-        ("https://api.binance.us/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
         ("https://fapi.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
         ("https://fstream.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
     ]
@@ -1062,13 +1055,7 @@ def motor_de_trading():
                     break
                 senal = generar_senal_para_mercado(mercado, hora_actual, tipo="auto")
                 if not senal:
-                    # Intentar fallback automático cuando el análisis principal no devuelve señal
-                    print(f"ℹ️ No se generó señal principal para {mercado['symbol']}. Intentando fallback automático...")
-                    senal = generar_senal_fallback(mercado, hora_actual, tipo="auto")
-                    if senal:
-                        print(f"ℹ️ Se generó señal de fallback automático para {mercado['symbol']}")
-                    else:
-                        continue
+                    continue
 
                 if senal["direccion"] == "COMPRA" and senal["precio_actual"] > senal["ema_200"]:
                     enviar_senal_y_registrar(senal, tipo="auto")
