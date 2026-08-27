@@ -2,9 +2,9 @@
 
 import os
 import time
-import threading                     # Intervención para Render
+import threading                     # Requerido para Render
 from datetime import datetime, timezone
-from flask import Flask              # Intervención para Render
+from flask import Flask              # Requerido para Render
 
 import ccxt
 import pandas as pd
@@ -16,13 +16,13 @@ except ImportError:
     winsound = None
 
 # =====================================================================
-# CONFIGURACIÓN FLASK PARA ENGAÑAR A RENDER (MANTIENE EL BOT VIVO GRATIS)
+# CONFIGURACIÓN FLASK PARA ENGAÑAR A RENDER (MANTIENE EL BOT VIVO)
 # =====================================================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Club MarketSharks - Nuevo Algoritmo Smart Money Activo", 200
+    return "Club MarketSharks - Algoritmo Smart Money Explicativo Activo", 200
 # =====================================================================
 
 SYMBOL = os.getenv("BITGET_SYMBOL", "BTC/USDT:USDT")
@@ -175,15 +175,34 @@ def enviar_telegram(side, color, zone_type, price, zone_low, zone_high):
         print("Aviso: faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID; señal sólo en terminal.", flush=True)
         return False
 
-    direction = "🟢 COMPRA" if side == "COMPRA" else "🔴 VENTA"
+    direction = "🟢 COMPRA (LONG)" if side == "COMPRA" else "🔴 VENTA (SHORT)"
+    
+    if zone_type == "Order Block":
+        significado = "Suelo fuerte donde las grandes instituciones acumularon compras." if side == "COMPRA" else "Techo fuerte donde las grandes instituciones acumularon ventas."
+        accion = "Espera a que el precio aguante el rango para buscar un REBOTE AL ALZA." if side == "COMPRA" else "Espera a que el precio rechace el rango para buscar un REBOTE A LA BAJA."
+        nota_seguridad = f"Si el precio cae por debajo de {zone_low:,.2f}, el suelo se invalida." if side == "COMPRA" else f"Si el precio sube por encima de {zone_high:,.2f}, el techo se invalida."
+    elif zone_type == "Fair Value Gap":
+        significado = "Hueco de ineficiencia dejado por algoritmos. El precio actúa como imán para rellenarlo."
+        accion = "Zona de soporte temporal. El precio busca apoyo para continuar subiendo." if side == "COMPRA" else "Zona de resistencia temporal. El precio cubrió el vacío y puede caer."
+        nota_seguridad = f"Invalidación si cruza completo los {zone_low:,.2f}" if side == "COMPRA" else f"Invalidación si cruza completo los {zone_high:,.2f}"
+    else:
+        significado = "El precio entró en el 5% más BARATO del rango reciente." if side == "COMPRA" else "El precio entró en el 5% más CARO del rango reciente."
+        accion = "Buen momento para buscar entradas al alza de forma segura." if side == "COMPRA" else "Buen momento para buscar entradas a la baja de forma segura."
+        nota_seguridad = "Opera con precaución observando la fuerza del mercado."
+
     message = (
-        f"🦈 *SEÑAL BTCUSDT*\n\n"
-        f"{direction}\n"
-        f"Zona: {color}\n"
-        f"Tipo: {zone_type}\n"
-        f"Precio: `{price:,.2f}`\n"
-        f"Rango: `{zone_low:,.2f} - {zone_high:,.2f}`"
+        f"🦈 *SHARK SMART MONEY ALERT*\n"
+        f"───────────────────────\n"
+        f"🎬 *ACCIÓN:* **{direction}**\n"
+        f"📊 *Precio Actual:* `{price:,.2f}`\n"
+        f"📌 *Tipo de Zona:* `{zone_type} ({color})`\n"
+        f"📐 *Rango Operativo:* `{zone_low:,.2f} - {zone_high:,.2f}`\n"
+        f"───────────────────────\n"
+        f"📖 *¿Qué significa?*\n_{significado}_\n\n"
+        f"💡 *Estrategia:* \n*{accion}*\n\n"
+        f"⚠️ *Invalidación:* `{nota_seguridad}`"
     )
+
     url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
     try:
         response = requests.post(
@@ -228,7 +247,7 @@ def revisar_zonas(frame, zones, notified):
 
 
 def bucle_infinito_bot():
-    """El bucle infinito original del bot se mueve aquí dentro para que corra de fondo."""
+    """El bucle analítico asíncrono corre aquí para no colgar el hilo principal de Flask."""
     notified = set()
     last_candle_timestamp = None
     zones = []
@@ -237,6 +256,7 @@ def bucle_infinito_bot():
         f"consulta cada {POLL_SECONDS}s",
         flush=True,
     )
+    print("Pulsa Ctrl+C para detenerlo.", flush=True)
     
     while True:
         try:
@@ -246,7 +266,6 @@ def bucle_infinito_bot():
                 zones = calcular_zonas(frame)
                 last_candle_timestamp = closed_timestamp
             
-            # Revisar toques en cada ciclo de 15 segundos
             revisar_zonas(frame, zones, notified)
             time.sleep(POLL_SECONDS)
         except Exception as e:
@@ -255,9 +274,9 @@ def bucle_infinito_bot():
 
 
 if __name__ == "__main__":
-    # 1. Lanzamos el bot infinito en segundo plano para que analice y mande alertas
+    # Arrancamos la monitorización asíncrona de las velas en segundo plano
     threading.Thread(target=bucle_infinito_bot, daemon=True).start()
     
-    # 2. Encendemos Flask en el hilo principal para que Render vea el puerto abierto y no dé error
+    # Lanzamos el servidor web HTTP para que Render no tire la conexión por puerto cerrado
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
