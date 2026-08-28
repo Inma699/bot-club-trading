@@ -58,27 +58,46 @@ exchange.set_sandbox_mode(True)  # Modo Demo activo para tu seguridad
 
 
 def ejecutar_orden_demo(side, precio_actual):
-    """Abre una posicion de mercado simulada en Bitget Demo Trading."""
+    """Abre una posicion de mercado simulada en Bitget Demo en MODO AISLADO y x75 de Apalancamiento."""
     global POSICIONES_ACTIVAS_BOT
     if not API_KEY or not SECRET_KEY:
         print("Aviso: Falta configuración de API Keys en las Variables de Entorno.", flush=True)
         return
         
     try:
-        ccxt_side = "buy" if side == "COMPRA" else "sell"
-        print(f"🛒 [BITGET DEMO] Enviando orden de mercado {ccxt_side.upper()}...", flush=True)
+        # 1. Configurar obligatoriamente el Apalancamiento a x75 en la API
+        try:
+            exchange.set_leverage(leverage=75, symbol=SYMBOL, params={"marginMode": "isolated"})
+            print("⚙️ [BITGET DEMO] Apalancamiento configurado con éxito a x75 (Aislado).", flush=True)
+        except Exception as le:
+            print(f"⚠️ Nota de apalancamiento (puede estar ya configurado): {le}", flush=True)
+
+        # 2. Configurar la dirección del trade
+        if side == "COMPRA":
+            ccxt_side = "buy"
+            hold_side = "long"   
+        else:
+            ccxt_side = "sell"
+            hold_side = "short"  
+            
+        print(f"🛒 [BITGET DEMO] Enviando orden de mercado {ccxt_side.upper()} (holdSide: {hold_side})...", flush=True)
         
+        # 3. Lanzar la orden especificando Modo Aislado y el holdSide requerido
         orden = exchange.create_market_order(
             symbol=SYMBOL,
             side=ccxt_side,
-            amount=CANTIDAD_BTC
+            amount=CANTIDAD_BTC,
+            params={
+                "holdSide": hold_side,    
+                "marginMode": "isolated"   # <--- Forzado a Modo Aislado por tus instrucciones
+            }
         )
         
-        # Guardar en memoria para que el rastreador dinámico vigile las ganancias
         POSICIONES_ACTIVAS_BOT.append({
-            "direccion": side,        # COMPRA (LONG) o VENTA (SHORT)
+            "direccion": side,        
             "precio_entrada": precio_actual,
-            "cantidad": CANTIDAD_BTC
+            "cantidad": CANTIDAD_BTC,
+            "hold_side": hold_side    
         })
         
         print(f"✅ [BITGET DEMO] Orden ejecutada con éxito ID: {orden.get('id', 'N/A')}", flush=True)
@@ -88,7 +107,7 @@ def ejecutar_orden_demo(side, precio_actual):
 
 
 def monitorear_y_cerrar_por_ganancia(precio_actual):
-    """Revisa las posiciones activas del bot y las liquida si alcanzaron el objetivo en dólares."""
+    """Revisa las posiciones activas del bot y las liquida en modo aislado si alcanzaron el objetivo."""
     global POSICIONES_ACTIVAS_BOT
     if not POSICIONES_ACTIVAS_BOT:
         return
@@ -97,33 +116,35 @@ def monitorear_y_cerrar_por_ganancia(precio_actual):
         entrada = pos["precio_entrada"]
         cantidad = pos["cantidad"]
         
-        # Calcular beneficio matemático flotante en USD según la dirección del trade
         if pos["direccion"] == "COMPRA":
             pnl_usd = (precio_actual - entrada) * cantidad
-        else: # VENTA
+        else: 
             pnl_usd = (entrada - precio_actual) * cantidad
             
         print(f"📊 [RASTREADOR] P&L actual de la posición {pos['direccion']}: {pnl_usd:+.2f} USD", flush=True)
 
-        # 🚨 CONDICIÓN DE DISPARO DEL TAKE PROFIT AUTOMÁTICO
         if pnl_usd >= OBJETIVO_GANANCIA_USD:
             print(f"🎯 [TARGET ALCANZADO] Beneficio de +{pnl_usd:.2f} USD detectado. Cerrando trade...", flush=True)
             try:
-                # La clave para cerrar futuros: usar el lado opuesto y activar 'reduceOnly'
                 lado_cierre = "sell" if pos["direccion"] == "COMPRA" else "buy"
+                hold_side_cierre = "long" if pos["direccion"] == "COMPRA" else "short"
                 
+                # Ejecutar la orden de reducción en modo aislado
                 orden_cierre = exchange.create_market_order(
                     symbol=SYMBOL,
                     side=lado_cierre,
                     amount=cantidad,
-                    params={"reduceOnly": True}  # <-- ESTE PARÁMETRO ES EL SECRETO QUE EVITA EL ERROR DE BITGET
+                    params={
+                        "reduceOnly": True,
+                        "holdSide": hold_side_cierre,
+                        "marginMode": "isolated"  # <--- Forzado a Modo Aislado también en el cierre
+                    }
                 )
                 
-                # Notificar el éxito del cierre automatizado por Telegram
                 msg_cierre = (
                     f"🎯 *SHARK TAKE PROFIT AUTOMÁTICO*\n"
                     f"───────────────────────\n"
-                    f"✅ Position {pos['direccion']} cerrada en Bitget Demo.\n"
+                    f"✅ Posición {pos['direccion']} (Aislado x75) cerrada en Bitget Demo.\n"
                     f"💰 Ganancia Realizada: *+{pnl_usd:.2f} USD*\n"
                     f"📈 Precio Entrada: `{entrada:,.2f}`\n"
                     f"📉 Precio Salida: `{precio_actual:,.2f}`"
