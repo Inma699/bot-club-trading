@@ -1,4 +1,4 @@
-"""Monitor autonomo de zonas Smart Money para BTCUSDT con ejecucion y cierre automatico en Bitget Demo."""
+"""Monitor autonomo de zonas Smart Money (15m) con filtros geometricos de canal, soportes y ejecucion en Bitget Demo."""
 
 import os
 import time
@@ -8,6 +8,7 @@ from flask import Flask
 
 import ccxt
 import pandas as pd
+import numpy as np
 import requests
 
 try:
@@ -19,11 +20,11 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Club MarketSharks - Algoritmo Smart Money con Cierre por Ganancia Activo", 200
+    return "Club MarketSharks - Algoritmo Smart Money Pro con Filtro Geometrico Activo", 200
 
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 SYMBOL = os.getenv("BITGET_SYMBOL", "BTC/USDT:USDT")
-TIMEFRAME = os.getenv("SMART_MONEY_TIMEFRAME", "15m")
+TIMEFRAME = os.getenv("SMART_MONEY_TIMEFRAME", "15m")  # Gráfico de 15 minutos
 POLL_SECONDS = int(os.getenv("SMART_MONEY_POLL_SECONDS", "15"))
 CANDLE_LIMIT = int(os.getenv("SMART_MONEY_CANDLE_LIMIT", "200"))
 MAX_ZONES = int(os.getenv("SMART_MONEY_MAX_ZONES", "100"))
@@ -35,12 +36,14 @@ SECRET_KEY = os.getenv("BITGET_API_SECRET", "").strip()
 PASSPHRASE = os.getenv("BITGET_PASSWORD", "").strip()
 
 # =====================================================================
-# ⚙️ CONFIGURACIÓN DE OBJETIVOS DE DINERO PARA EL CIERRE AUTOMÁTICO
+# ⚙️ CONFIGURACIÓN DE OBJETIVOS Y PARÁMETROS GEOMÉTRICOS (15m)
 # =====================================================================
-OBJETIVO_GANANCIA_USD = 10.0  # El bot cerrará la posición al ganar esta cantidad exacta de dólares.
-CANTIDAD_BTC = 0.001          # Tamaño de cada trade (Aproximadamente $80 USD de margen nominal)
+OBJETIVO_GANANCIA_USD = 10.0  # Take Profit en dinero real
+CANTIDAD_BTC = 0.001          # Tamaño de la orden
+PERIODO_CANAL = 20           # Velas de 15m para calcular el canal lineal
+MULTIPLICADOR_CANAL = 2.0     # Amplitud de las bandas del canal institucional
 
-# Memoria en segundo plano para rastrear las posiciones abiertas por el bot
+# Memoria de operaciones activas
 POSICIONES_ACTIVAS_BOT = []
 
 exchange_config = {
@@ -54,25 +57,42 @@ if API_KEY and SECRET_KEY and PASSPHRASE:
     exchange_config["password"] = PASSPHRASE
 
 exchange = ccxt.bitget(exchange_config)
-exchange.set_sandbox_mode(True)  # Modo Demo activo para tu seguridad
+exchange.set_sandbox_mode(True)  # Operaciones simuladas en entorno Sandbox
+
+
+def calcular_lineas_geometricas_15m(df):
+    """Calcula matematicamente el canal de regresion y los pivotes horizontales en 15m."""
+    # 1. Regresión lineal para canal dinámico
+    bloque = df['close'].iloc[-PERIODO_CANAL:].values
+    x = np.arange(PERIODO_CANAL)
+    coef = np.polyfit(x, bloque, 1)
+    centro = coef * (PERIODO_CANAL - 1) + coef
+    
+    std_dev = df['close'].iloc[-PERIODO_CANAL:].std()
+    techo_canal = centro + (std_dev * MULTIPLICADOR_CANAL)
+    piso_canal = centro - (std_dev * MULTIPLICADOR_CANAL)
+    
+    # 2. Soportes y Resistencias mayores (últimas 30 velas de 15m = 7.5 horas de mercado)
+    resistencia_maxima = float(df['high'].iloc[-30:-1].max())
+    soporte_minimo = float(df['low'].iloc[-30:-1].min())
+    
+    return float(techo_canal), float(piso_canal), resistencia_maxima, soporte_minimo
 
 
 def ejecutar_orden_demo(side, precio_actual):
-    """Abre una posicion de mercado simulada en Bitget Demo en MODO AISLADO y x75 de Apalancamiento."""
+    """Abre una posicion en Bitget Demo en MODO AISLADO y apalancamiento x75."""
     global POSICIONES_ACTIVAS_BOT
     if not API_KEY or not SECRET_KEY:
         print("Aviso: Falta configuración de API Keys en las Variables de Entorno.", flush=True)
         return
         
     try:
-        # 1. Configurar obligatoriamente el Apalancamiento a x75 en la API
+        # Configurar apalancamiento x75 de manera aislada antes de entrar
         try:
             exchange.set_leverage(leverage=75, symbol=SYMBOL, params={"marginMode": "isolated"})
-            print("⚙️ [BITGET DEMO] Apalancamiento configurado con éxito a x75 (Aislado).", flush=True)
         except Exception as le:
-            print(f"⚠️ Nota de apalancamiento (puede estar ya configurado): {le}", flush=True)
+            print(f"⚠️ Apalancamiento ya establecido o nota: {le}", flush=True)
 
-        # 2. Configurar la dirección del trade
         if side == "COMPRA":
             ccxt_side = "buy"
             hold_side = "long"   
@@ -80,16 +100,15 @@ def ejecutar_orden_demo(side, precio_actual):
             ccxt_side = "sell"
             hold_side = "short"  
             
-        print(f"🛒 [BITGET DEMO] Enviando orden de mercado {ccxt_side.upper()} (holdSide: {hold_side})...", flush=True)
+        print(f"🛒 [BITGET DEMO 15M] Enviando orden {ccxt_side.upper()} (Aislado x75)...", flush=True)
         
-        # 3. Lanzar la orden especificando Modo Aislado y el holdSide requerido
         orden = exchange.create_market_order(
             symbol=SYMBOL,
             side=ccxt_side,
             amount=CANTIDAD_BTC,
             params={
                 "holdSide": hold_side,    
-                "marginMode": "isolated"   # <--- Forzado a Modo Aislado por tus instrucciones
+                "marginMode": "isolated"   
             }
         )
         
@@ -99,7 +118,6 @@ def ejecutar_orden_demo(side, precio_actual):
             "cantidad": CANTIDAD_BTC,
             "hold_side": hold_side    
         })
-        
         print(f"✅ [BITGET DEMO] Orden ejecutada con éxito ID: {orden.get('id', 'N/A')}", flush=True)
         
     except Exception as e:
@@ -107,29 +125,22 @@ def ejecutar_orden_demo(side, precio_actual):
 
 
 def monitorear_y_cerrar_por_ganancia(precio_actual):
-    """Revisa las posiciones activas del bot y las liquida en modo aislado si alcanzaron el objetivo."""
     global POSICIONES_ACTIVAS_BOT
-    if not POSICIONES_ACTIVAS_BOT:
-        return
+    if not POSICIONES_ACTIVAS_BOT: return
 
     for pos in POSICIONES_ACTIVAS_BOT[:]:
         entrada = pos["precio_entrada"]
         cantidad = pos["cantidad"]
         
-        if pos["direccion"] == "COMPRA":
-            pnl_usd = (precio_actual - entrada) * cantidad
-        else: 
-            pnl_usd = (entrada - precio_actual) * cantidad
-            
-        print(f"📊 [RASTREADOR] P&L actual de la posición {pos['direccion']}: {pnl_usd:+.2f} USD", flush=True)
+        pnl_usd = (precio_actual - entrada) * cantidad if pos["direccion"] == "COMPRA" else (entrada - precio_actual) * cantidad
+        print(f"📊 [RASTREADOR 15M] P&L de posición {pos['direccion']}: {pnl_usd:+.2f} USD", flush=True)
 
         if pnl_usd >= OBJETIVO_GANANCIA_USD:
-            print(f"🎯 [TARGET ALCANZADO] Beneficio de +{pnl_usd:.2f} USD detectado. Cerrando trade...", flush=True)
+            print(f"🎯 [TARGET 15M ALCANZADO] Cerrando trade con ganancias...", flush=True)
             try:
                 lado_cierre = "sell" if pos["direccion"] == "COMPRA" else "buy"
-                hold_side_cierre = "long" if pos["direccion"] == "COMPRA" else "short"
+                hold_side_cierre = pos["hold_side"]
                 
-                # Ejecutar la orden de reducción en modo aislado
                 orden_cierre = exchange.create_market_order(
                     symbol=SYMBOL,
                     side=lado_cierre,
@@ -137,25 +148,22 @@ def monitorear_y_cerrar_por_ganancia(precio_actual):
                     params={
                         "reduceOnly": True,
                         "holdSide": hold_side_cierre,
-                        "marginMode": "isolated"  # <--- Forzado a Modo Aislado también en el cierre
+                        "marginMode": "isolated"  
                     }
                 )
                 
                 msg_cierre = (
-                    f"🎯 *SHARK TAKE PROFIT AUTOMÁTICO*\n"
+                    f"🎯 *SHARK TAKE PROFIT AUTOMÁTICO (15m)*\n"
                     f"───────────────────────\n"
-                    f"✅ Posición {pos['direccion']} (Aislado x75) cerrada en Bitget Demo.\n"
+                    f"✅ Posición {pos['direccion']} (Aislado x75) liquidada.\n"
                     f"💰 Ganancia Realizada: *+{pnl_usd:.2f} USD*\n"
-                    f"📈 Precio Entrada: `{entrada:,.2f}`\n"
-                    f"📉 Precio Salida: `{precio_actual:,.2f}`"
+                    f"📈 Entrada: `{entrada:,.2f}` | 📉 Salida: `{precio_actual:,.2f}`"
                 )
                 enviar_telegram_directo(msg_cierre)
-                
                 POSICIONES_ACTIVAS_BOT.remove(pos)
-                print(f"🔒 [CERRADO] Posición liquidada con éxito ID: {orden_cierre.get('id', 'N/A')}", flush=True)
-                
+                print(f"🔒 Posición liquidada con éxito.", flush=True)
             except Exception as error:
-                print(f"❌ Error crítico ejecutando el cierre automático en Bitget: {error}", flush=True)
+                print(f"❌ Error ejecutando el cierre en Bitget: {error}", flush=True)
 
 
 def enviar_telegram_directo(message):
@@ -164,12 +172,12 @@ def enviar_telegram_directo(message):
     try:
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
         return True
-    except Exception: return False
+    except: return False
 
 
 def descargar_velas():
     candles = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=CANDLE_LIMIT)
-    if len(candles) < 30: raise RuntimeError("Bitget devolvio muy pocas velas")
+    if len(candles) < 30: raise RuntimeError("Bitget devolvio pocas velas")
     frame = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
     for column in ["open", "high", "low", "close", "volume"]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -217,47 +225,24 @@ def toca_zona(candle, zone):
     return float(candle["high"]) >= zone["low"] and float(candle["low"]) <= zone["high"]
 
 
-def sonar_senal(side):
-    if winsound is None: return
-    tonos = [(1200, 350), (1600, 350)] if side == "COMPRA" else [(700, 450), (500, 450)]
-    try:
-        for f, d in tonos: winsound.Beep(f, d)
-    except: pass
-
-
-def enviar_telegram(side, color, zone_type, price, zone_low, zone_high):
+def enviar_telegram_filtrado(side, color, zone_type, price, zone_low, zone_high, filtro_motivo, techo, piso):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return False
+    # (Este fragmento inicia dentro de la función enviar_telegram_filtrado)
     direction = "🟢 COMPRA (LONG)" if side == "COMPRA" else "🔴 VENTA (SHORT)"
     
-    if zone_type == "Order Block":
-        significado = "Suelo fuerte donde las grandes instituciones acumularon compras." if side == "COMPRA" else "Techo fuerte donde las grandes instituciones acumularon ventas."
-        accion = "Espera a que el precio de un REBOTE AL ALZA." if side == "COMPRA" else "Espera a que el precio de un REBOTE A LA BAJA."
-        nota_seguridad = f"Si cae por debajo de {zone_low:,.2f}, el suelo se invalida." if side == "COMPRA" else f"Si sube por encima de {zone_high:,.2f}, el techo se invalida."
-    elif zone_type == "Fair Value Gap":
-        significado = "Hueco de ineficiencia dejado por algoritmos."
-
-
-        # (Viene del bloque IF / ELIF superior de la función enviar_telegram)
-        accion = "Zona de soporte temporal." if side == "COMPRA" else "Zona de resistencia temporal."
-        nota_seguridad = f"Invalidación si cruza {zone_low:,.2f}" if side == "COMPRA" else f"Invalidación si cruza {zone_high:,.2f}"
-    else:
-        significado = "El precio entró en la zona más BARATA." if side == "COMPRA" else "El precio entró en la zona más CARA."
-        accion = "Buscar entradas al alza." if side == "COMPRA" else "Buscar entradas a la baja."
-        nota_seguridad = "Vigila la fuerza de la tendencia."
-
     message = (
-        f"🦈 *SHARK SMART MONEY ALERT*\n"
+        f"🦈 *SHARK PRO GEOMETRIC ALERT (15m)*\n"
         f"───────────────────────\n"
-        f"🎬 *ACCIÓN:* **{direction}**\n"
+        f"🎬 *ACCIÓN EN DIRECTO:* **{direction}**\n"
         f"📊 *Precio:* `{price:,.2f}`\n"
-        f"📌 *Zona:* `{zone_type} ({color})`\n"
-        f"📐 *Rango:* `{zone_low:,.2f} - {zone_high:,.2f}`\n"
+        f"📌 *Filtro Estructural:* `{filtro_motivo}`\n"
+        f"📐 *Zona Mitigada:* `{zone_type} ({color})`\n"
+        f"📐 *Rango Zona:* `{zone_low:,.2f} - {zone_high:,.2f}`\n"
+        f"📈 *Bordes Canal 15m:* `[{piso:,.1f} - {techo:,.1f}]`\n"
         f"───────────────────────\n"
-        f"📖 *¿Qué significa?*\n_{significado}_\n\n"
-        f"💡 *Estrategia:* \n*{accion}*\n\n"
-        f"⚠️ *Invalidación:* `{nota_seguridad}`"
+        f"💡 *Estrategia:* Confirmación de confluencia geométrica e institucional de alta probabilidad. Posición abierta en Bitget Demo (Aislado x75)."
     )
-
+    
     url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
     try:
         response = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
@@ -266,7 +251,7 @@ def enviar_telegram(side, color, zone_type, price, zone_low, zone_high):
         return False
 
 
-def revisar_zonas(frame, zones, notified):
+def revisar_zonas(frame, zones, notified, techo, piso, res, sup):
     previous = frame.iloc[-2]
     current = frame.iloc[-1]
     current_timestamp = int(current["timestamp"])
@@ -274,21 +259,38 @@ def revisar_zonas(frame, zones, notified):
     for zone in zones:
         zone_id = (zone["side"], zone["type"], zone["created_at"])
         entered = toca_zona(current, zone) and not toca_zona(previous, zone)
+        
         if entered and (zone_id, current_timestamp) not in notified:
             notified.add((zone_id, current_timestamp))
-            sonar_senal(zone["side"])
             price = float(current["close"])
             
-            enviar_telegram(zone["side"], zone["color"], zone["type"], price, zone["low"], zone["high"])
-            ejecutar_orden_demo(zone["side"], price)
-            print(f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] SEÑAL EMITIDA: {zone['side']} | BTC {price:,.2f}", flush=True)
+            # 🚨 CRITERIOS DE FILTRADO GEOMÉTRICO INSTITUCIONAL (15 MINUTOS) 🚨
+            validar_operacion = False
+            motivo = ""
+            
+            # Margen de holgura en 15m debido al tamaño de las velas de Bitcoin ($35 dólares)
+            if zone["side"] == "COMPRA":
+                if price <= (piso + 35.0) or price <= (sup + 35.0):
+                    validar_operacion = True
+                    motivo = "CONFLUENCIA EN SOPORTE / PISO DEL CANAL MACRO"
+            else: # VENTA
+                if price >= (techo - 35.0) or price >= (res - 35.0):
+                    validar_operacion = True
+                    motivo = "CONFLUENCIA EN RESISTENCIA / TECHO DEL CANAL MACRO"
+                    
+            if validar_operacion:
+                # Solo si pasa el estricto filtro geométrico, envía la señal e ingresa al mercado
+                enviar_telegram_filtrado(zone["side"], zone["color"], zone["type"], price, zone["low"], zone["high"], motivo, techo, piso)
+                ejecutar_orden_demo(zone["side"], price)
+                print(f"💎 [SEÑAL VALIDADA 15M] {zone['side']} por {motivo}", flush=True)
+            else:
+                print(f"🚫 [SEÑAL FILTRADA] {zone['side']} ignorada por estar en el centro del canal (RUIDO).", flush=True)
 
 
 def bucle_infinito_bot():
     notified = set()
     last_candle_timestamp = None
     zones = []
-    print(f"Monitor Smart Money activo: {SYMBOL} | {TIMEFRAME} | cada {POLL_SECONDS}s", flush=True)
     
     while True:
         try:
@@ -296,13 +298,15 @@ def bucle_infinito_bot():
             precio_actual = float(frame.iloc[-1]["close"])
             closed_timestamp = int(frame.iloc[-2]["timestamp"])
             
+            # Calcular las paredes del canal y soportes horizontales de 15m en cada iteración
+            techo, piso, res, sup = calcular_lineas_geometricas_15m(frame)
+            
             if closed_timestamp != last_candle_timestamp:
                 zones = calcular_zonas(frame)
                 last_candle_timestamp = closed_timestamp
+                print(f"📊 [15m] Canal recalculado | Techo: {techo:,.1f} | Piso: {piso:,.1f}", flush=True)
             
-            revisar_zonas(frame, zones, notified)
-            
-            # 🚨 LLAMADA CRUCIAL AL RASTREADOR: Revisa ganancias cada 15 segundos en vivo
+            revisar_zonas(frame, zones, notified, techo, piso, res, sup)
             monitorear_y_cerrar_por_ganancia(precio_actual)
             
             time.sleep(POLL_SECONDS)
@@ -315,5 +319,3 @@ if __name__ == "__main__":
     threading.Thread(target=bucle_infinito_bot, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-
