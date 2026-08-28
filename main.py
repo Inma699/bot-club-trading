@@ -19,7 +19,7 @@ def home():
 
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 SYMBOL = os.getenv("BITGET_SYMBOL", "BTC/USDT:USDT")
-TIMEFRAME = "1m"  # <--- FORZADO A 1 MINUTO PARA SEÑALES ULTRA RÁPIDAS
+TIMEFRAME = "1m"  
 POLL_SECONDS = 15  
 CANDLE_LIMIT = 150
 MAX_ZONES = 50
@@ -33,12 +33,12 @@ PASSPHRASE = os.getenv("BITGET_PASSWORD", "").strip()
 # =====================================================================
 # ⚙️ CONFIGURACIÓN DE PARÁMETROS GEOMÉTRICOS Y TRADES (ESTILO ORO 1M)
 # =====================================================================
-OBJETIVO_GANANCIA_USD = 5.0   # Take Profit corto para scalping rápido ($5 USD)
-CANTIDAD_BTC = 0.002          # Tamaño de orden un poco mayor para ver el P&L rápido
-PERIODO_CANAL = 30           # 30 velas de 1m para el canal de regresión (Última media hora)
-MULTIPLICADOR_CANAL = 1.8     # Ajuste estrecho para capturar extremos
-InpHolguraPips = 8            # Holgura de 8 pips convertida a dólares para BTC ($8 USD)
-InpProteccionSLPips = 20      # Protección por fuera de estructura ($20 USD)
+OBJETIVO_GANANCIA_USD = 5.0   
+CANTIDAD_BTC = 0.002          
+PERIODO_CANAL = 30           
+MULTIPLICADOR_CANAL = 1.8     
+InpHolguraPips = 8            
+InpProteccionSLPips = 20      
 
 # Memoria de operaciones activas
 POSICIONES_ACTIVAS_BOT = []
@@ -54,24 +54,24 @@ if API_KEY and SECRET_KEY and PASSPHRASE:
     exchange_config["password"] = PASSPHRASE
 
 exchange = ccxt.bitget(exchange_config)
-exchange.set_sandbox_mode(True)  # MODO DEMO SEGURO ACTIVO
+exchange.set_sandbox_mode(True)  
 
 
 def calcular_lineas_geometricas_1m(df):
-    """Calcula matemáticamente el canal de regresión y los pivotes horizontales idénticos a tus trazos visuales."""
+    """Calcula matemáticamente el canal de regresión forzando valores numéricos puros (escalares)."""
     # 1. Regresión lineal para canal dinámico
     bloque = df['close'].iloc[-PERIODO_CANAL:].values
     x = np.arange(PERIODO_CANAL)
     coef = np.polyfit(x, bloque, 1)
     
-    centro_array = coef * (PERIODO_CANAL - 1) + coef
-    centro = float(np.atleast_1d(centro_array))
+    # Extraer el intercepto forzando el tipo escalar de Python para evitar el error de NumPy
+    centro = float(coef[0] * (PERIODO_CANAL - 1) + coef[1])
     
     std_dev = float(df['close'].iloc[-PERIODO_CANAL:].std())
     techo_canal = centro + (std_dev * MULTIPLICADOR_CANAL)
     piso_canal  = centro - (std_dev * MULTIPLICADOR_CANAL)
     
-    # 2. Soportes y Resistencias horizontales mayores (Últimas 25 velas = 25 minutos)
+    # 2. Soportes y Resistencias horizontales mayores
     resistencia_maxima = float(df['high'].iloc[-25:-1].max())
     soporte_minimo = float(df['low'].iloc[-25:-1].min())
     
@@ -86,7 +86,6 @@ def ejecutar_orden_demo(side, precio_actual):
         return
         
     try:
-        # Configurar apalancamiento x75 enviando los parámetros complementarios para cuentas Hedge
         try:
             exchange.set_leverage(
                 leverage=75, 
@@ -241,15 +240,11 @@ def enviar_telegram_filtrado(side, modo_tipo, price, techo, piso, filtro_motivo)
         f"───────────────────────\n"
         f"💼 Orden enviada con éxito a Bitget Demo (Aislado x75)."
     )
-    
     url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
         return True
-    except: 
-        return False
-
-
+    except: return False
 def revisar_y_operar_1m(frame, zones, notified, techo, piso, res, sup):
     previous = frame.iloc[-2]
     current = frame.iloc[-1]
@@ -279,7 +274,7 @@ def revisar_y_operar_1m(frame, zones, notified, techo, piso, res, sup):
                 ejecutar_orden_demo(zone["side"], price)
                 return
 
-    # --- LÓGICA DE RUPTURAS EXPLOSIVAS DE EXTREMOS (BREAKOUT COMO TU CAPTURA) ---
+    # --- LÓGICA DE RUPTURAS EXPLOSIVAS DE EXTREMOS (BREAKOUT) ---
     if len(POSICIONES_ACTIVAS_BOT) == 0:
         if price > (techo + InpHolguraPips) or price > (res + InpHolguraPips):
             enviar_telegram_filtrado("COMPRA", "RUPTURA DE CANAL (BREAKOUT)", price, techo, piso, "Escape alcista fuera del Rango Geométrico")
@@ -300,11 +295,11 @@ def bucle_infinito_bot():
             precio_actual = float(frame.iloc[-1]["close"])
             closed_timestamp = int(frame.iloc[-2]["timestamp"])
             
-            # Dibujar y calcular líneas de control geométrico en cada iteración
+            # Forzar de forma única el uso de la función matemática de 1m corregida
             techo, piso, res, sup = calcular_lineas_geometricas_1m(frame)
             
             if closed_timestamp != last_candle_timestamp:
-                zones = calcular_zonas_smc(frame)
+                zones = calcular_zones_smc(frame)
                 last_candle_timestamp = closed_timestamp
                 print(f"📊 [1m] Líneas geométricas actualizadas | Techo: {techo:,.1f} | Piso: {piso:,.1f}", flush=True)
             
@@ -321,3 +316,5 @@ if __name__ == "__main__":
     threading.Thread(target=bucle_infinito_bot, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+
