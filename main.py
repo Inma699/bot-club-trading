@@ -1,4 +1,4 @@
-"""Monitor autonomo de zonas Smart Money (15m) con filtros geometricos de canal, soportes y ejecucion en Bitget Demo."""
+"""Monitor autonomo de alta frecuencia (1m) Smart Money + Rupturas + Geometria para BTCUSDT en Bitget Demo."""
 
 import os
 import time
@@ -11,23 +11,18 @@ import pandas as pd
 import numpy as np
 import requests
 
-try:
-    import winsound
-except ImportError:
-    winsound = None
-
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Club MarketSharks - Algoritmo Smart Money Pro con Filtro Geometrico Activo", 200
+    return "Club MarketSharks - Radar de Alta Frecuencia 1m Activo", 200
 
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 SYMBOL = os.getenv("BITGET_SYMBOL", "BTC/USDT:USDT")
-TIMEFRAME = os.getenv("SMART_MONEY_TIMEFRAME", "15m")  
-POLL_SECONDS = int(os.getenv("SMART_MONEY_POLL_SECONDS", "15"))
-CANDLE_LIMIT = int(os.getenv("SMART_MONEY_CANDLE_LIMIT", "200"))
-MAX_ZONES = int(os.getenv("SMART_MONEY_MAX_ZONES", "100"))
+TIMEFRAME = "1m"  # <--- FORZADO A 1 MINUTO PARA SEÑALES ULTRA RÁPIDAS
+POLL_SECONDS = 15  
+CANDLE_LIMIT = 150
+MAX_ZONES = 50
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
@@ -36,12 +31,14 @@ SECRET_KEY = os.getenv("BITGET_API_SECRET", "").strip()
 PASSPHRASE = os.getenv("BITGET_PASSWORD", "").strip()
 
 # =====================================================================
-# ⚙️ CONFIGURACIÓN DE OBJETIVOS Y PARÁMETROS GEOMÉTRICOS (15m)
+# ⚙️ CONFIGURACIÓN DE PARÁMETROS GEOMÉTRICOS Y TRADES (ESTILO ORO 1M)
 # =====================================================================
-OBJETIVO_GANANCIA_USD = 10.0  
-CANTIDAD_BTC = 0.001          
-PERIODO_CANAL = 20           
-MULTIPLICADOR_CANAL = 2.0     
+OBJETIVO_GANANCIA_USD = 5.0   # Take Profit corto para scalping rápido ($5 USD)
+CANTIDAD_BTC = 0.002          # Tamaño de orden un poco mayor para ver el P&L rápido
+PERIODO_CANAL = 30           # 30 velas de 1m para el canal de regresión (Última media hora)
+MULTIPLICADOR_CANAL = 1.8     # Ajuste estrecho para capturar extremos
+InpHolguraPips = 8            # Holgura de 8 pips convertida a dólares para BTC ($8 USD)
+InpProteccionSLPips = 20      # Protección por fuera de estructura ($20 USD)
 
 # Memoria de operaciones activas
 POSICIONES_ACTIVAS_BOT = []
@@ -57,43 +54,51 @@ if API_KEY and SECRET_KEY and PASSPHRASE:
     exchange_config["password"] = PASSPHRASE
 
 exchange = ccxt.bitget(exchange_config)
-exchange.set_sandbox_mode(True)  
+exchange.set_sandbox_mode(True)  # MODO DEMO SEGURO ACTIVO
 
 
-def calcular_lineas_geometricas_15m(df):
-    """Calcula matematicamente el canal de regresion y los pivotes horizontales en 15m de forma segura."""
+def calcular_lineas_geometricas_1m(df):
+    """Calcula matemáticamente el canal de regresión y los pivotes horizontales idénticos a tus trazos visuales."""
     # 1. Regresión lineal para canal dinámico
     bloque = df['close'].iloc[-PERIODO_CANAL:].values
     x = np.arange(PERIODO_CANAL)
     coef = np.polyfit(x, bloque, 1)
     
-    # CORRECCIÓN CRUCIAL: Extraer estrictamente el valor numérico escalar puro
-    centro_array = coef[0] * (PERIODO_CANAL - 1) + coef[1]
-    centro = float(np.atleast_1d(centro_array)[0])
+    centro_array = coef * (PERIODO_CANAL - 1) + coef
+    centro = float(np.atleast_1d(centro_array))
     
     std_dev = float(df['close'].iloc[-PERIODO_CANAL:].std())
     techo_canal = centro + (std_dev * MULTIPLICADOR_CANAL)
     piso_canal  = centro - (std_dev * MULTIPLICADOR_CANAL)
     
-    # 2. Soportes y Resistencias mayores (últimas 30 velas)
-    resistencia_maxima = float(df['high'].iloc[-30:-1].max())
-    soporte_minimo = float(df['low'].iloc[-30:-1].min())
+    # 2. Soportes y Resistencias horizontales mayores (Últimas 25 velas = 25 minutos)
+    resistencia_maxima = float(df['high'].iloc[-25:-1].max())
+    soporte_minimo = float(df['low'].iloc[-25:-1].min())
     
     return techo_canal, piso_canal, resistencia_maxima, soporte_minimo
 
 
 def ejecutar_orden_demo(side, precio_actual):
-    """Abre una posicion en Bitget Demo en MODO AISLADO y apalancamiento x75."""
+    """Abre una posición en Bitget Demo en MODO AISLADO x75 con parámetros Mix V2 válidos."""
     global POSICIONES_ACTIVAS_BOT
     if not API_KEY or not SECRET_KEY:
         print("Aviso: Falta configuración de API Keys en las Variables de Entorno.", flush=True)
         return
         
     try:
+        # Configurar apalancamiento x75 enviando los parámetros complementarios para cuentas Hedge
         try:
-            exchange.set_leverage(leverage=75, symbol=SYMBOL, params={"marginMode": "isolated"})
-        except Exception as le:
-            print(f"⚠️ Apalancamiento ya establecido o nota: {le}", flush=True)
+            exchange.set_leverage(
+                leverage=75, 
+                symbol=SYMBOL, 
+                params={
+                    "marginMode": "isolated",
+                    "productType": "usd-perpetual",
+                    "holdSide": "long" if side == "COMPRA" else "short"
+                }
+            )
+        except:
+            pass
 
         if side == "COMPRA":
             ccxt_side = "buy"
@@ -102,7 +107,7 @@ def ejecutar_orden_demo(side, precio_actual):
             ccxt_side = "sell"
             hold_side = "short"  
             
-        print(f"🛒 [BITGET DEMO 15M] Enviando orden {ccxt_side.upper()} (Aislado x75)...", flush=True)
+        print(f"🛒 [BITGET DEMO 1M] Enviando orden {ccxt_side.upper()} (holdSide: {hold_side})...", flush=True)
         
         orden = exchange.create_market_order(
             symbol=SYMBOL,
@@ -110,7 +115,8 @@ def ejecutar_orden_demo(side, precio_actual):
             amount=CANTIDAD_BTC,
             params={
                 "holdSide": hold_side,    
-                "marginMode": "isolated"   
+                "marginMode": "isolated",
+                "productType": "usd-perpetual"
             }
         )
         
@@ -135,13 +141,12 @@ def monitorear_y_cerrar_por_ganancia(precio_actual):
         cantidad = pos["cantidad"]
         
         pnl_usd = (precio_actual - entrada) * cantidad if pos["direccion"] == "COMPRA" else (entrada - precio_actual) * cantidad
-        print(f"📊 [RASTREADOR 15M] P&L de posición {pos['direccion']}: {pnl_usd:+.2f} USD", flush=True)
+        print(f"📊 [RASTREADOR M1] P&L de posición {pos['direccion']}: {pnl_usd:+.2f} USD", flush=True)
 
         if pnl_usd >= OBJETIVO_GANANCIA_USD:
-            print(f"🎯 [TARGET 15M ALCANZADO] Cerrando trade con ganancias...", flush=True)
+            print(f"🎯 [TARGET M1 ALCANZADO] Cerrando trade con ganancias en la nube...", flush=True)
             try:
                 lado_cierre = "sell" if pos["direccion"] == "COMPRA" else "buy"
-                hold_side_cierre = pos["hold_side"]
                 
                 orden_cierre = exchange.create_market_order(
                     symbol=SYMBOL,
@@ -149,13 +154,14 @@ def monitorear_y_cerrar_por_ganancia(precio_actual):
                     amount=cantidad,
                     params={
                         "reduceOnly": True,
-                        "holdSide": hold_side_cierre,
-                        "marginMode": "isolated"  
+                        "holdSide": pos["hold_side"], 
+                        "marginMode": "isolated",
+                        "productType": "usd-perpetual"
                     }
                 )
                 
                 msg_cierre = (
-                    f"🎯 *SHARK TAKE PROFIT AUTOMÁTICO (15m)*\n"
+                    f"🎯 *SHARK SCALPER 1M: TAKE PROFIT*\n"
                     f"───────────────────────\n"
                     f"✅ Posición {pos['direccion']} (Aislado x75) liquidada.\n"
                     f"💰 Ganancia Realizada: *+{pnl_usd:.2f} USD*\n"
@@ -165,7 +171,7 @@ def monitorear_y_cerrar_por_ganancia(precio_actual):
                 POSICIONES_ACTIVAS_BOT.remove(pos)
                 print(f"🔒 Posición liquidada con éxito.", flush=True)
             except Exception as error:
-                print(f"❌ Error ejecutando el cierre en Bitget: {error}", flush=True)
+                print(f"❌ Error ejecutando el cierre en Bitget V2: {error}", flush=True)
 
 
 def enviar_telegram_directo(message):
@@ -186,7 +192,7 @@ def descargar_velas():
     return frame.dropna().reset_index(drop=True)
 
 
-def calcular_zonas(frame):
+def calcular_zonas_smc(frame):
     zones = []
     ranges = (frame["high"] - frame["low"]).rolling(14).mean().shift(1)
     last_index = len(frame) - 2
@@ -197,8 +203,8 @@ def calcular_zonas(frame):
         if pd.isna(average_range) or average_range <= 0: continue
 
         impulse_range = impulse["high"] - impulse["low"]
-        bullish_impulse = (base["close"] < base["open"] and impulse["close"] > impulse["open"] and impulse["close"] > base["high"] and impulse_range >= average_range * 1.1)
-        bearish_impulse = (base["close"] > base["open"] and impulse["close"] < impulse["open"] and impulse["close"] < base["low"] and impulse_range >= average_range * 1.1)
+        bullish_impulse = (base["close"] < base["open"] and impulse["close"] > impulse["open"] and impulse["close"] > base["high"] and impulse_range >= average_range * 1.2)
+        bearish_impulse = (base["close"] > base["open"] and impulse["close"] < impulse["open"] and impulse["close"] < base["low"] and impulse_range >= average_range * 1.2)
 
         if bullish_impulse:
             zones.append({"side": "COMPRA", "color": "AZUL", "type": "Order Block", "low": float(base["low"]), "high": float(base["high"]), "created_at": int(base["timestamp"])})
@@ -213,13 +219,6 @@ def calcular_zonas(frame):
         elif current["high"] < older["low"]:
             zones.append({"side": "VENTA", "color": "ROJO", "type": "Fair Value Gap", "low": float(current["high"]), "high": float(older["low"]), "created_at": int(current["timestamp"])})
 
-    swing_frame = frame.iloc[max(0, last_index - 49):last_index]
-    range_high = float(swing_frame["high"].max())
-    range_low = float(swing_frame["low"].min())
-    zones.extend([
-        {"side": "VENTA", "color": "ROSA", "type": "Premium", "low": range_high * 0.95 + range_low * 0.05, "high": range_high, "created_at": int(frame.iloc[last_index]["timestamp"])},
-        {"side": "COMPRA", "color": "AZUL", "type": "Discount", "low": range_low, "high": range_low * 0.95 + range_high * 0.05, "created_at": int(frame.iloc[last_index]["timestamp"])},
-    ])
     return zones[-MAX_ZONES:]
 
 
@@ -227,62 +226,67 @@ def toca_zona(candle, zone):
     return float(candle["high"]) >= zone["low"] and float(candle["low"]) <= zone["high"]
 
 
-def enviar_telegram_filtrado(side, color, zone_type, price, zone_low, zone_high, filtro_motivo, techo, piso):
+def enviar_telegram_filtrado(side, modo_tipo, price, techo, piso, filtro_motivo):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return False
     direction = "🟢 COMPRA (LONG)" if side == "COMPRA" else "🔴 VENTA (SHORT)"
     
     message = (
-        f"🦈 *SHARK PRO GEOMETRIC ALERT (15m)*\n"
+        f"🦈 *SHARK SCALPER 1M DIRECTO (Nube)*\n"
         f"───────────────────────\n"
-        f"🎬 *ACCIÓN EN DIRECTO:* **{direction}**\n"
-        f"📊 *Precio:* `{price:,.2f}`\n"
-        f"📌 *Filtro Estructural:* `{filtro_motivo}`\n"
-        f"📐 *Zona Mitigada:* `{zone_type} ({color})`\n"
-        f"📐 *Rango Zona:* `{zone_low:,.2f} - {zone_high:,.2f}`\n"
-        f"📈 *Bordes Canal 15m:* `[{piso:,.1f} - {techo:,.1f}]`\n"
+        f"🎬 *ACCIÓN DETECTADA:* **{direction}**\n"
+        f"📊 *Precio Entrada:* `{price:,.2f}`\n"
+        f"📌 *Modo Entrada:* `{modo_tipo}`\n"
+        f"🛠️ *Confluencia:* `{filtro_motivo}`\n"
+        f"📈 *Canal Geométrico 1m:* `[{piso:,.1f} - {techo:,.1f}]`\n"
         f"───────────────────────\n"
-        f"💡 *Estrategia:* Confirmación de confluencia geométrica e institucional de alta probabilidad. Posición abierta en Bitget Demo (Aislado x75)."
+        f"💼 Orden enviada con éxito a Bitget Demo (Aislado x75)."
     )
     
     url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
     try:
-        response = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
-        return response.ok
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        return True
     except: 
         return False
 
 
-def revisar_zonas(frame, zones, notified, techo, piso, res, sup):
+def revisar_y_operar_1m(frame, zones, notified, techo, piso, res, sup):
     previous = frame.iloc[-2]
     current = frame.iloc[-1]
     current_timestamp = int(current["timestamp"])
+    price = float(current["close"])
 
+    # --- LÓGICA DE REBOTES EN EXTREMOS (SMART MONEY) ---
     for zone in zones:
         zone_id = (zone["side"], zone["type"], zone["created_at"])
         entered = toca_zona(current, zone) and not toca_zona(previous, zone)
         
         if entered and (zone_id, current_timestamp) not in notified:
             notified.add((zone_id, current_timestamp))
-            price = float(current["close"])
             
-            validar_operacion = False
-            motivo = ""
+            validar_rebote = False
+            motivo_geo = ""
             
-            if zone["side"] == "COMPRA":
-                if price <= (piso + 35.0) or price <= (sup + 35.0):
-                    validar_operacion = True
-                    motivo = "CONFLUENCIA EN SOPORTE / PISO DEL CANAL MACRO"
-            else: 
-                if price >= (techo - 35.0) or price >= (res - 35.0):
-                    validar_operacion = True
-                    motivo = "CONFLUENCIA EN RESISTENCIA / TECHO DEL CANAL MACRO"
-                    
-            if validar_operacion:
-                enviar_telegram_filtrado(zone["side"], zone["color"], zone["type"], price, zone["low"], zone["high"], motivo, techo, piso)
+            if zone["side"] == "COMPRA" and (price <= (piso + InpHolguraPips) or price <= (sup + InpHolguraPips)):
+                validar_rebote = True
+                motivo_geo = "Toque en Soporte Horizontal / Pared Baja Canal 1m"
+            elif zone["side"] == "VENTA" and (price >= (techo - InpHolguraPips) or price >= (res - InpHolguraPips)):
+                validar_rebote = True
+                motivo_geo = "Toque en Resistencia Horizontal / Pared Alta Canal 1m"
+                
+            if validar_rebote and len(POSICIONES_ACTIVAS_BOT) == 0:
+                enviar_telegram_filtrado(zone["side"], f"REBOTE {zone['type']}", price, techo, piso, motivo_geo)
                 ejecutar_orden_demo(zone["side"], price)
-                print(f"💎 [SEÑAL VALIDADA 15M] {zone['side']} por {motivo}", flush=True)
-            else:
-                print(f"🚫 [SEÑAL FILTRADA] {zone['side']} ignorada por estar en el centro del canal (RUIDO).", flush=True)
+                return
+
+    # --- LÓGICA DE RUPTURAS EXPLOSIVAS DE EXTREMOS (BREAKOUT COMO TU CAPTURA) ---
+    if len(POSICIONES_ACTIVAS_BOT) == 0:
+        if price > (techo + InpHolguraPips) or price > (res + InpHolguraPips):
+            enviar_telegram_filtrado("COMPRA", "RUPTURA DE CANAL (BREAKOUT)", price, techo, piso, "Escape alcista fuera del Rango Geométrico")
+            ejecutar_orden_demo("COMPRA", price)
+        elif price < (piso - InpHolguraPips) or price < (sup - InpHolguraPips):
+            enviar_telegram_filtrado("VENTA", "RUPTURA DE CANAL (BREAKOUT)", price, techo, piso, "Escape bajista fuera del Rango Geométrico")
+            ejecutar_orden_demo("VENTA", price)
 
 
 def bucle_infinito_bot():
@@ -296,19 +300,20 @@ def bucle_infinito_bot():
             precio_actual = float(frame.iloc[-1]["close"])
             closed_timestamp = int(frame.iloc[-2]["timestamp"])
             
-            techo, piso, res, sup = calcular_lineas_geometricas_15m(frame)
+            # Dibujar y calcular líneas de control geométrico en cada iteración
+            techo, piso, res, sup = calcular_lineas_geometricas_1m(frame)
             
             if closed_timestamp != last_candle_timestamp:
-                zones = calcular_zonas(frame)
+                zones = calcular_zonas_smc(frame)
                 last_candle_timestamp = closed_timestamp
-                print(f"📊 [15m] Canal recalculado | Techo: {techo:,.1f} | Piso: {piso:,.1f}", flush=True)
+                print(f"📊 [1m] Líneas geométricas actualizadas | Techo: {techo:,.1f} | Piso: {piso:,.1f}", flush=True)
             
-            revisar_zonas(frame, zones, notified, techo, piso, res, sup)
+            revisar_y_operar_1m(frame, zones, notified, techo, piso, res, sup)
             monitorear_y_cerrar_por_ganancia(precio_actual)
             
             time.sleep(POLL_SECONDS)
         except Exception as e:
-            print(f"⚠️ Error en ejecución: {e}", flush=True)
+            print(f"⚠️ Error en ejecución 1m: {e}", flush=True)
             time.sleep(10)
 
 
