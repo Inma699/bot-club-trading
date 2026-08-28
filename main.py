@@ -24,7 +24,7 @@ def home():
 
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 SYMBOL = os.getenv("BITGET_SYMBOL", "BTC/USDT:USDT")
-TIMEFRAME = os.getenv("SMART_MONEY_TIMEFRAME", "15m")  # Gráfico de 15 minutos
+TIMEFRAME = os.getenv("SMART_MONEY_TIMEFRAME", "15m")  
 POLL_SECONDS = int(os.getenv("SMART_MONEY_POLL_SECONDS", "15"))
 CANDLE_LIMIT = int(os.getenv("SMART_MONEY_CANDLE_LIMIT", "200"))
 MAX_ZONES = int(os.getenv("SMART_MONEY_MAX_ZONES", "100"))
@@ -38,10 +38,10 @@ PASSPHRASE = os.getenv("BITGET_PASSWORD", "").strip()
 # =====================================================================
 # ⚙️ CONFIGURACIÓN DE OBJETIVOS Y PARÁMETROS GEOMÉTRICOS (15m)
 # =====================================================================
-OBJETIVO_GANANCIA_USD = 10.0  # Take Profit en dinero real
-CANTIDAD_BTC = 0.001          # Tamaño de la orden
-PERIODO_CANAL = 20           # Velas de 15m para calcular el canal lineal
-MULTIPLICADOR_CANAL = 2.0     # Amplitud de las bandas del canal institucional
+OBJETIVO_GANANCIA_USD = 10.0  
+CANTIDAD_BTC = 0.001          
+PERIODO_CANAL = 20           
+MULTIPLICADOR_CANAL = 2.0     
 
 # Memoria de operaciones activas
 POSICIONES_ACTIVAS_BOT = []
@@ -57,26 +57,29 @@ if API_KEY and SECRET_KEY and PASSPHRASE:
     exchange_config["password"] = PASSPHRASE
 
 exchange = ccxt.bitget(exchange_config)
-exchange.set_sandbox_mode(True)  # Operaciones simuladas en entorno Sandbox
+exchange.set_sandbox_mode(True)  
 
 
 def calcular_lineas_geometricas_15m(df):
-    """Calcula matematicamente el canal de regresion y los pivotes horizontales en 15m."""
+    """Calcula matematicamente el canal de regresion y los pivotes horizontales en 15m de forma segura."""
     # 1. Regresión lineal para canal dinámico
     bloque = df['close'].iloc[-PERIODO_CANAL:].values
     x = np.arange(PERIODO_CANAL)
     coef = np.polyfit(x, bloque, 1)
-    centro = coef * (PERIODO_CANAL - 1) + coef
     
-    std_dev = df['close'].iloc[-PERIODO_CANAL:].std()
+    # CORRECCIÓN CRUCIAL: Extraer estrictamente el valor numérico escalar puro
+    centro_array = coef[0] * (PERIODO_CANAL - 1) + coef[1]
+    centro = float(np.atleast_1d(centro_array)[0])
+    
+    std_dev = float(df['close'].iloc[-PERIODO_CANAL:].std())
     techo_canal = centro + (std_dev * MULTIPLICADOR_CANAL)
-    piso_canal = centro - (std_dev * MULTIPLICADOR_CANAL)
+    piso_canal  = centro - (std_dev * MULTIPLICADOR_CANAL)
     
-    # 2. Soportes y Resistencias mayores (últimas 30 velas de 15m = 7.5 horas de mercado)
+    # 2. Soportes y Resistencias mayores (últimas 30 velas)
     resistencia_maxima = float(df['high'].iloc[-30:-1].max())
     soporte_minimo = float(df['low'].iloc[-30:-1].min())
     
-    return float(techo_canal), float(piso_canal), resistencia_maxima, soporte_minimo
+    return techo_canal, piso_canal, resistencia_maxima, soporte_minimo
 
 
 def ejecutar_orden_demo(side, precio_actual):
@@ -87,7 +90,6 @@ def ejecutar_orden_demo(side, precio_actual):
         return
         
     try:
-        # Configurar apalancamiento x75 de manera aislada antes de entrar
         try:
             exchange.set_leverage(leverage=75, symbol=SYMBOL, params={"marginMode": "isolated"})
         except Exception as le:
@@ -227,7 +229,6 @@ def toca_zona(candle, zone):
 
 def enviar_telegram_filtrado(side, color, zone_type, price, zone_low, zone_high, filtro_motivo, techo, piso):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return False
-    # (Este fragmento inicia dentro de la función enviar_telegram_filtrado)
     direction = "🟢 COMPRA (LONG)" if side == "COMPRA" else "🔴 VENTA (SHORT)"
     
     message = (
@@ -264,22 +265,19 @@ def revisar_zonas(frame, zones, notified, techo, piso, res, sup):
             notified.add((zone_id, current_timestamp))
             price = float(current["close"])
             
-            # 🚨 CRITERIOS DE FILTRADO GEOMÉTRICO INSTITUCIONAL (15 MINUTOS) 🚨
             validar_operacion = False
             motivo = ""
             
-            # Margen de holgura en 15m debido al tamaño de las velas de Bitcoin ($35 dólares)
             if zone["side"] == "COMPRA":
                 if price <= (piso + 35.0) or price <= (sup + 35.0):
                     validar_operacion = True
                     motivo = "CONFLUENCIA EN SOPORTE / PISO DEL CANAL MACRO"
-            else: # VENTA
+            else: 
                 if price >= (techo - 35.0) or price >= (res - 35.0):
                     validar_operacion = True
                     motivo = "CONFLUENCIA EN RESISTENCIA / TECHO DEL CANAL MACRO"
                     
             if validar_operacion:
-                # Solo si pasa el estricto filtro geométrico, envía la señal e ingresa al mercado
                 enviar_telegram_filtrado(zone["side"], zone["color"], zone["type"], price, zone["low"], zone["high"], motivo, techo, piso)
                 ejecutar_orden_demo(zone["side"], price)
                 print(f"💎 [SEÑAL VALIDADA 15M] {zone['side']} por {motivo}", flush=True)
@@ -298,7 +296,6 @@ def bucle_infinito_bot():
             precio_actual = float(frame.iloc[-1]["close"])
             closed_timestamp = int(frame.iloc[-2]["timestamp"])
             
-            # Calcular las paredes del canal y soportes horizontales de 15m en cada iteración
             techo, piso, res, sup = calcular_lineas_geometricas_15m(frame)
             
             if closed_timestamp != last_candle_timestamp:
