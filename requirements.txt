@@ -4,3 +4,4 @@ python-telegram-bot==21.3
 gunicorn==22.0.0
 ccxt
 pandas
+psycopg2-binary==2.9.9
