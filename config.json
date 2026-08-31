@@ -4,9 +4,10 @@
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.99,
     "exchange": {
-        "name": "binance",
-        "key": "${FREQTRADE__EXCHANGE__KEY}",
-        "secret": "${FREQTRADE__EXCHANGE__SECRET}",
+        "name": "bitget",
+        "key": "bg_6af894126dfa57ee9bcc706780d735f8",
+        "secret": "aae4aaaca2a4bfab7b77dbcd1663ff2c42bc5f0cb321c4a7dfce6582193e5c42",
+        "password": "MiBotDeTrading2026",
         "pair_whitelist": [
             "BTC/USDT"
         ],
@@ -14,8 +15,8 @@
     },
     "telegram": {
         "enabled": true,
-        "token": "${FREQTRADE__TELEGRAM__TOKEN}",
-        "chat_id": "${TELEGRAM_CHANNEL_ID}",
+        "token": "8919964375:AAG8sIFofXOejkHK4UJ4Z0EscmHrdgydi38",
+        "chat_id": "-1003908093232",
         "notification_settings": {
             "status": "on",
             "warning": "on",
