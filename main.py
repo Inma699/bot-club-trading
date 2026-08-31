@@ -1035,12 +1035,11 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
     enviar_senal_telegram(mensaje_error, chat_id=chat_id)
     return False
 
-
 def telegram_listener():
     if not TOKEN_TELEGRAM:
         return
     
-    # 🚨 INYECTADO: Forzar a Telegram a limpiar el webhook fantasma y actualizaciones atascadas
+    # Forzar a Telegram a limpiar el webhook fantasma y actualizaciones atascadas
     try:
         print("🧹 Forzando limpieza de Webhook y desatascando mensajes antiguos en Telegram...")
         url_clear = f"https://telegram.org{TOKEN_TELEGRAM}/deleteWebhook"
@@ -1051,11 +1050,8 @@ def telegram_listener():
 
     offset = None
     while True:
-
-    offset = None
-    while True:
         try:
-            url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/getUpdates"
+            url = f"https://telegram.org{TOKEN_TELEGRAM}/getUpdates"
             params = {"timeout": 5}
             if offset is not None:
                 params["offset"] = offset
@@ -1071,9 +1067,19 @@ def telegram_listener():
                     chat_id = message.get("chat", {}).get("id")
                     user_id = message.get("from", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
+                    
+                    # Capturar /start e ingresar usuario de la web a Supabase
+                    if text == "/start":
+                        guardar_usuario_db(user_id)
+                        welcome_msg = (
+                            "🦈 Welcome to Club MarketSharks, Predator!\n\n"
+                            "Your account has been registered successfully. You will now receive all high-precision trading signals directly in this private chat."
+                        )
+                        enviar_senal_telegram(welcome_msg, chat_id=user_id)
+                    
                     if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal", "!senal", "!senalahora"}:
                         generar_senal_manual(chat_id=chat_id, requester_id=user_id)
-                    if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
+                    if text in {"/senalbtc", "senalbtc", "btcmanual"}:
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
                     if text in {"/senalspx", "/senalspcx", "senalspx", "senalspcx", "spxmanual", "spcxmanual"}:
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spcx", requester_id=user_id)
@@ -1083,24 +1089,22 @@ def telegram_listener():
                     user_id = callback.get("from", {}).get("id")
                     data = callback.get("data", "")
                     if data == "senal_btc":
-                        answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
+                        answer_url = f"https://telegram.org{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
                     if data == "senal_spcx":
-                        answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
+                        answer_url = f"https://telegram.org{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPCX..."}, timeout=10)
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spcx", requester_id=user_id)
                     if data == "toggle_auto":
-                        # Solo admins pueden togglear
                         if not es_admin_del_canal(user_id):
-                            answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
+                            answer_url = f"https://telegram.org{TOKEN_TELEGRAM}/answerCallbackQuery"
                             requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Solo administradores pueden cambiar el estado de automáticas."}, timeout=10)
                         else:
-                            # Alternar
                             global AUTO_SIGNAL_ENABLED
                             AUTO_SIGNAL_ENABLED = not AUTO_SIGNAL_ENABLED
                             nuevo_estado = "activadas" if AUTO_SIGNAL_ENABLED else "desactivadas"
-                            requests.post(f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery", json={"callback_query_id": callback.get("id"), "text": f"Automáticas {nuevo_estado}."}, timeout=10)
+                            requests.post(f"https://telegram.org{TOKEN_TELEGRAM}/answerCallbackQuery", json={"callback_query_id": callback.get("id"), "text": f"Automáticas {nuevo_estado}."}, timeout=10)
                             enviar_senal_telegram(f"⚙️ Señales automáticas ahora *{nuevo_estado}* por petición del admin {user_id}.", chat_id=CHAT_ID_CANAL)
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
