@@ -1170,17 +1170,21 @@ def motor_de_trading():
 
 
 if __name__ == '__main__':
-    # 1) Arrancamos tu motor analítico en un hilo secundario como antes
-    hilo_trading = threading.Thread(target=motor_de_trading)
-    hilo_trading.daemon = True
-    hilo_trading.start()
-
-    # 2) Encendemos el listener de Telegram en el hilo principal para que tenga máxima prioridad
+    # 1) Encendemos PRIMERO el listener de Telegram para que conecte con la API de inmediato
+    print("✈️ Conectando con la API de Telegram y activando el listener privado...")
     hilo_listener = threading.Thread(target=telegram_listener)
     hilo_listener.daemon = True
     hilo_listener.start()
 
-    # 3) Mantenemos Flask vivo en el puerto de Render para el Cron Job
+    # 2) Arrancamos tu motor analítico de señales en segundo plano
+    print("🦈 Activando motor analítico duplicador de TradingView...")
+    hilo_trading = threading.Thread(target=motor_de_trading)
+    hilo_trading.daemon = True
+    hilo_trading.start()
+
+    # 3) DEJAMOS FLASK AL FINAL DEL TODO. Él se encargará de mantener el servidor Web vivo para el Cron Job
+    print("🌐 Iniciando servidor Flask en puerto Render...")
     puerto = int(os.getenv("PORT", 10000))
     app.run(host='0.0.0.0', port=puerto, use_reloader=False, threaded=True)
+
 
