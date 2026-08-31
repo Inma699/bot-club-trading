@@ -2,47 +2,21 @@ import os
 import threading
 import time
 import requests
-import psycopg2
+import psycopg2  # <=== INYECTADO: Conector nativo de base de datos
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
 
 app = Flask(__name__)
 
-BOT_TELEGRAM_URL = "https://t.me/ClubMSharks_bot"
-
 @app.route('/')
 def home():
-    return """
-    <!doctype html>
-    <html lang="es">
-    <head>
-        <meta charset="utf-8">
-        <title>Club MarketSharks</title>
-        <style>
-            body { font-family: Arial, sans-serif; background: #07111f; color: white; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-            .container { text-align: center; padding: 40px; }
-            h1 { margin-bottom: 16px; }
-            .btn {
-                display: inline-block; text-decoration: none; background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: white;
-                padding: 14px 28px; border-radius: 999px; font-weight: bold; font-size: 1.1rem; box-shadow: 0 10px 30px rgba(59,130,246,.35);
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Club MarketSharks</h1>
-            <p>Algoritmo Espejo TradingView Activo</p>
-            <a class="btn" href="https://t.me/ClubMSharks_bot" target="_blank" rel="noopener noreferrer">Join Us Now</a>
-        </div>
-    </body>
-    </html>
-    """, 200
+    return "Club MarketSharks - Algoritmo Espejo TradingView Activo", 200
 
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # <=== INYECTADO: Captura tu URI de Supabase
 
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
@@ -102,9 +76,19 @@ def es_admin_del_canal(chat_id=None):
         return False
     return str(chat_id) in ADMINS_CANAL
 
+# === CONTROL DE SEÑALES AUTOMÁTICAS ===
+AUTO_SIGNAL_ENABLED = True
+AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
+ULTIMA_SENAL_AUTOMATICA = None
+DETENER_BOT = threading.Event()
 
+
+# ==========================================
+# === FUNCIONES DE BASE DE DATOS INYECTADAS ===
+# ==========================================
 def get_db_connection():
     if not DATABASE_URL:
+        print("⚠️ No hay DATABASE_URL configurada en Render.")
         return None
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -114,29 +98,16 @@ def get_db_connection():
         print(f"❌ Error conectando a PostgreSQL: {e}")
         return None
 
-
 def guardar_usuario_db(user_id):
     if user_id is None:
         return False
-    try:
-        user_id = int(user_id)
-    except (TypeError, ValueError):
-        return False
-
     conn = get_db_connection()
     if not conn:
         return False
-
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS telegram_users (
-                    user_id BIGINT PRIMARY KEY,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
-            """)
-            cur.execute("""
-                INSERT INTO telegram_users (user_id)
+                INSERT INTO usuarios (user_id)
                 VALUES (%s)
                 ON CONFLICT (user_id) DO NOTHING;
             """, (user_id,))
@@ -147,47 +118,548 @@ def guardar_usuario_db(user_id):
     finally:
         conn.close()
 
-
 def obtener_ids_telegram_db():
     conn = get_db_connection()
     if not conn:
         return []
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT user_id FROM telegram_users ORDER BY created_at ASC;")
-            return [str(row[0]) for row in cur.fetchall()]
+            cur.execute("SELECT user_id FROM usuarios;")
+            return [row[0] for row in cur.fetchall()]
     except Exception as e:
         print(f"❌ Error leyendo usuarios de DB: {e}")
         return []
     finally:
         conn.close()
 
-
-def enviar_senal_a_canal_y_usuarios(mensaje):
-    # 1) Canal principal
-    enviar_senal_telegram(mensaje, chat_id=CHAT_ID_CANAL)
-
-    # 2) Chat privado a todos los usuarios de la base de datos
-    for user_id in obtener_ids_telegram_db():
+def enviar_senal_a_usuarios_privados(mensaje):
+    usuarios = obtener_ids_telegram_db()
+    for user_id in usuarios:
         try:
+            # Reutiliza tu función nativa de envío de Telegram
             enviar_senal_telegram(mensaje, chat_id=user_id)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ No se pudo enviar por privado al usuario {user_id}: {e}")
+# ==========================================
 
 
-def enviar_senal_telegram(mensaje, chat_id=None):
-    target_chat = chat_id or TELEGRAM_CHAT_ID
+@app.route('/stop')
+def stop_bot():
+    DETENER_BOT.set()
+    return "Bot detenido", 200
+
+
+def puede_enviar_senal_automatica(forzar=False):
+    global ULTIMA_SENAL_AUTOMATICA
+    if not AUTO_SIGNAL_ENABLED:
+        return False
+    if forzar:
+        return True
+    if ULTIMA_SENAL_AUTOMATICA is None:
+        return True
+    return (time.time() - ULTIMA_SENAL_AUTOMATICA["timestamp"]) >= AUTO_SIGNAL_COOLDOWN_SECONDS
+
+
+def limpiar_solicitudes_si_es_necesario():
+    global SOLICITUDES_MANUALES
+    hoy = hora_espana().strftime("%Y-%m-%d")
+    for chat_id in list(SOLICITUDES_MANUALES.keys()):
+        if SOLICITUDES_MANUALES[chat_id].get("fecha") != hoy:
+            del SOLICITUDES_MANUALES[chat_id]
+
+
+def hora_espana():
+    return datetime.now(ZoneInfo("Europe/Madrid"))
+
+
+def resetear_estado_diario_si_es_necesario():
+    global ESTADO_DIARIO
+    hoy = hora_espana().strftime("%Y-%m-%d")
+    if ESTADO_DIARIO["fecha"] != hoy:
+        ESTADO_DIARIO["fecha"] = hoy
+        ESTADO_DIARIO["senales_hoy"] = 0
+        ESTADO_DIARIO["senales_automaticas_hoy"] = 0
+        ESTADO_DIARIO["senales_manuales_hoy"] = 0
+        ESTADO_DIARIO["minimo_senales_alcanzado"] = False
+        ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] = False
+
+
+def evaluar_noticias_alto_impacto(hora_actual):
+    horas_riesgo = {8, 9, 10, 14, 15, 16}
+    if hora_actual.hour in horas_riesgo and hora_actual.minute < 30:
+        return "alto", "Ventana de riesgo macro detectada"
+    return "bajo", "Sin ventana de riesgo detectada"
+
+
+def evaluar_fuerza_movimiento(cierres, aperturas, altos, bajos):
+    if len(cierres) < 3:
+        return 0.0, {"cambio_1": 0.0, "cambio_3": 0.0, "rango_3": 0.0}
+
+    cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100
+    cambio_3 = ((cierres[-1] - cierres[-3]) / cierres[-3]) * 100
+    rango_3 = ((max(altos[-3:]) - min(bajos[-3:])) / cierres[-1]) * 100
+    fuerza = abs(cambio_1) + abs(cambio_3) + rango_3
+    return fuerza, {"cambio_1": cambio_1, "cambio_3": cambio_3, "rango_3": rango_3}
+
+
+def evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_actual, ema_200):
+    if len(cierres) < 5:
+        return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Datos insuficientes"}
+
+    cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100
+    cambio_3 = ((cierres[-1] - cierres[-3]) / cierres[-3]) * 100
+    volumen_actual = volumenes[-1]
+    volumen_promedio = sum(volumenes[-3:]) / max(1, len(volumenes[-3:]))
+    spike_volumen = volumen_actual / max(volumen_promedio, 1)
+    impulso_alza = cambio_1 >= 0.4 and cambio_3 >= 0.4 and spike_volumen >= 1.4 and precio_actual > ema_200
+    impulso_baja = cambio_1 <= -0.4 and cambio_3 <= -0.4 and spike_volumen >= 1.4 and precio_actual < ema_200
+
+    if impulso_alza:
+        return {"detectado": True, "direccion": "COMPRA", "motivo": f"Impulso fuerte al alza: cambio_1 {cambio_1:.2f}% | volumen {spike_volumen:.2f}x"}
+    if impulso_baja:
+        return {"detectado": True, "direccion": "VENTA", "motivo": f"Impulso fuerte a la baja: cambio_1 {cambio_1:.2f}% | volumen {spike_volumen:.2f}x"}
+    return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Sin impulso fuerte"}
+
+
+def obtener_datos_bitget(symbol, interval, limit=210):
+    sym_upper = str(symbol).upper()
+
+    if interval.endswith('m'):
+        try:
+            granularity = str(int(interval[:-1]) * 60)
+        except ValueError:
+            granularity = interval
+    elif interval.endswith('h'):
+        try:
+            granularity = str(int(interval[:-1]) * 3600)
+        except ValueError:
+            granularity = interval
+    else:
+        granularity = interval
+
+    endpoints = [
+        ("https://bitget.com", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://bitget.com", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://bitget.com", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://bitget.com", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://bitget.com", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+        ("https://bitget.com", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
+    ]
+
+    for url, params in endpoints:
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code != 200:
+                print(f"⚠️ Bitget {url} devolvió estado {r.status_code} para {symbol} {interval}: {r.text[:200]}")
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                txt = r.text.strip()
+                if txt.startswith('['):
+                    import json
+                    return json.loads(txt)
+                continue
+
+            if isinstance(data, dict):
+                code = str(data.get("code", "")).strip().lower()
+                if code and code not in {"0", "000", "00000", "ok", "success", "200"}:
+                    msg = data.get("msg") or data.get("message") or data.get("errorMessage") or ""
+                    print(f"⚠️ Bitget error {code} para {symbol} {interval}: {msg}")
+                    if code == "30032":
+                        continue
+                    continue
+                if "data" in data:
+                    inner = data["data"]
+                    if isinstance(inner, list):
+                        return inner
+                    if isinstance(inner, dict):
+
+                        if "candles" in inner and isinstance(inner["candles"], list):
+                            return inner["candles"]
+                if "candles" in data and isinstance(data["candles"], list):
+                    return data["candles"]
+                if isinstance(data, list):
+                    return data
+            elif isinstance(data, list):
+                return data
+        except Exception as e:
+            print(f"⚠️ Error consultando Bitget {url} con params {params}: {e}")
+    print("⚠️ No se pudo obtener velas desde Bitget para", symbol)
+    return None
+
+
+def obtener_precio_bitget_v2(symbol):
+    """Obtiene el precio actual de SPCXUSDT usando endpoints modernos de Bitget."""
+    symbol_upper = str(symbol).upper()
+    endpoints = [
+        ("https://api.bitget.com/api/spot/v3/market/ticker", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v3/market/tickers", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v2/market/ticker", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v2/market/tickers", {"symbol": symbol_upper}),
+        ("https://api.bitget.com/api/spot/v3/market/candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+        ("https://api.bitget.com/api/spot/v2/market/candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+        ("https://api.bitget.com/api/spot/v3/market/history-candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+        ("https://api.bitget.com/api/spot/v2/market/history-candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
+    ]
+
+    for url, params in endpoints:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if isinstance(data, dict):
+                code = str(data.get("code", "")).strip().lower()
+                if code and code not in {"0", "000", "00000", "ok", "success", "200"}:
+                    continue
+
+                inner = data.get("data", data)
+                if isinstance(inner, dict):
+                    for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
+                        if key in inner:
+                            return float(inner[key])
+                    if "ticker" in inner and isinstance(inner["ticker"], dict):
+                        for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
+                            if key in inner["ticker"]:
+                                return float(inner["ticker"][key])
+                if isinstance(inner, list) and len(inner) > 0:
+                    cand = inner[0]
+                    if isinstance(cand, (list, tuple)) and len(cand) >= 5:
+                        return float(cand[4])
+                    if isinstance(cand, dict):
+                        for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
+                            if key in cand:
+                                return float(cand[key])
+            elif isinstance(data, list) and len(data) > 0:
+                cand = data[0]
+                if isinstance(cand, (list, tuple)) and len(cand) >= 5:
+                    return float(cand[4])
+        except Exception as e:
+            print(f"⚠️ Error consultando precio Bitget V2/V3 en {url}: {e}")
+    return None
+
+
+def buscar_id_coingecko_por_simbolo(symbol):
+    try:
+        response = requests.get("https://api.coingecko.com/api/v3/search", params={"query": symbol}, timeout=10)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if not isinstance(data, dict):
+            return None
+        coins = data.get("coins", [])
+        for coin in coins:
+            if str(coin.get("symbol", "")).lower() == str(symbol).lower():
+                return coin.get("id")
+        if coins:
+            return coins[0].get("id")
+    except Exception as e:
+        print(f"⚠️ Error buscando SPCX en CoinGecko: {e}")
+    return None
+
+
+def obtener_precio_alternativa_spcx():
+    """Fallback general para SPCX usando CoinGecko y, si es necesario, Binance."""
+    candidates = ["spcx"]
+    for coin_id in candidates:
+        try:
+            response = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": coin_id, "vs_currencies": "usdt,usd"},
+                timeout=10,
+            )
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if not isinstance(data, dict):
+                continue
+            coin_data = data.get(coin_id, {})
+            for currency in ("usdt", "usd"):
+                if coin_data.get(currency) is not None:
+                    return float(coin_data[currency])
+        except Exception as e:
+            print(f"⚠️ Error consultando CoinGecko para SPCX: {e}")
+
+    coin_id = buscar_id_coingecko_por_simbolo("SPCX")
+    if coin_id:
+        try:
+            response = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": coin_id, "vs_currencies": "usdt,usd"},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                coin_data = data.get(coin_id, {})
+                for currency in ("usdt", "usd"):
+                    if coin_data.get(currency) is not None:
+                        return float(coin_data[currency])
+        except Exception as e:
+            print(f"⚠️ Error consultando CoinGecko con id {coin_id}: {e}")
+
+    for url, params in [
+        ("https://api.binance.com/api/v3/ticker/price", {"symbol": "SPCXUSDT"}),
+        ("https://api.binance.us/api/v3/ticker/price", {"symbol": "SPCXUSDT"}),
+    ]:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and data.get("price") is not None:
+                    return float(data["price"])
+        except Exception as e:
+            print(f"⚠️ Error consultando fallback Binance para SPCX: {e}")
+
+    return None
+
+
+def obtener_precio_spcx():
+    precio = obtener_precio_bitget_v2('SPCXUSDT')
+    if precio is not None:
+        return precio
+    return obtener_precio_alternativa_spcx()
+
+
+def obtener_datos_binance(symbol, interval, limit=210):
+    # If this is the Bitget SPCX perpetual, route to Bitget data provider
+    if str(symbol).upper() == "SPCXUSDT":
+        return obtener_datos_bitget(symbol, interval, limit=limit)
+
+    urls = [
+        ("https://api.binance.com/api/v3/klines", {}),
+        ("https://api.binance.us/api/v3/klines", {}),
+    ]
+    symbols = [symbol]
+    for candidate_symbol in symbols:
+        params = {"symbol": candidate_symbol, "interval": interval, "limit": limit}
+        for url, extra_params in urls:
+            try:
+                response = requests.get(url, params={**params, **extra_params}, timeout=10)
+                if response.status_code == 200:
+                    return response.json()
+                print(f"⚠️ {url} devolvió estado {response.status_code} para {candidate_symbol} {interval}: {response.text[:200]}")
+            except Exception as e:
+                print(f"⚠️ Error consultando {url} para {candidate_symbol} {interval}: {e}")
+    return None
+
+
+def obtener_datos_binance_futuros(symbol, interval, limit=210):
+    urls = [
+        ("https://api.binance.us/fapi/v1/klines", {}),
+        ("https://fapi.binance.com/fapi/v1/klines", {}),
+        ("https://fstream.binance.com/fapi/v1/klines", {}),
+    ]
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    for url, extra_params in urls:
+        try:
+            response = requests.get(url, params={**params, **extra_params}, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            print(f"⚠️ {url} devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
+        except Exception as e:
+            print(f"⚠️ Error consultando {url} para {symbol} {interval}: {e}")
+    return None
+
+
+def obtener_ticker_24h(symbol):
+    urls = [
+        ("https://fapi.binance.com/fapi/v1/ticker/24hr", {"symbol": symbol}),
+        ("https://api.binance.us/fapi/v1/ticker/24hr", {"symbol": symbol}),
+    ]
+    for url, params in urls:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ Error consultando ticker 24h en {url}: {e}")
+    return None
+
+
+def obtener_funding_rate(symbol):
+    urls = [
+        ("https://api.binance.us/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
+        ("https://fapi.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
+        ("https://fstream.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
+    ]
+    for url, params in urls:
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            print(f"⚠️ Error consultando funding rate en {url}: {e}")
+    return None
+
+
+def evaluar_flujo_capital(precio_actual, ema_200, cierres, volumenes, ticker_24h, funding_rate):
+    if len(cierres) < 3:
+        return {"direccion": "NEUTRAL", "confianza": 0.0, "motivo": "Datos insuficientes"}
+
+    cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100
+    cambio_3 = ((cierres[-1] - cierres[-3]) / cierres[-3]) * 100
+    volumen_actual = volumenes[-1]
+    volumen_promedio = sum(volumenes[-3:]) / max(1, len(volumenes[-3:]))
+    spike_volumen = volumen_actual / max(volumen_promedio, 1)
+    cambio_24h = float(ticker_24h.get("priceChangePercent", 0)) if ticker_24h else 0.0
+    funding = float(funding_rate[0].get("fundingRate", 0)) if funding_rate and len(funding_rate) > 0 else 0.0
+
+    score_compra = 0.0
+    score_venta = 0.0
+
+    if precio_actual > ema_200:
+        score_compra += 1.0
+    else:
+        score_venta += 1.0
+    if cambio_1 > 0.15:
+        score_compra += 0.8
+    elif cambio_1 < -0.15:
+        score_venta += 0.8
+    if cambio_3 > 0.3:
+        score_compra += 0.8
+    elif cambio_3 < -0.3:
+        score_venta += 0.8
+    if spike_volumen > 1.4:
+        score_compra += 0.8 if cambio_24h >= 0 else 0.0
+        score_venta += 0.8 if cambio_24h < 0 else 0.0
+    if funding > 0.0001:
+        score_compra += 0.6
+    elif funding < -0.0001:
+        score_venta += 0.6
+    if cambio_24h > 1.0:
+        score_compra += 0.6
+    elif cambio_24h < -1.0:
+        score_venta += 0.6
+
+    if score_compra > score_venta:
+        return {"direccion": "COMPRA", "confianza": round(score_compra - score_venta, 2), "motivo": f"Volumen {spike_volumen:.2f}x | funding {funding:.6f} | 24h {cambio_24h:.2f}%"}
+    if score_venta > score_compra:
+        return {"direccion": "VENTA", "confianza": round(score_venta - score_compra, 2), "motivo": f"Volumen {spike_volumen:.2f}x | funding {funding:.6f} | 24h {cambio_24h:.2f}%"}
+    return {"direccion": "NEUTRAL", "confianza": 0.0, "motivo": f"Volumen {spike_volumen:.2f}x | funding {funding:.6f} | 24h {cambio_24h:.2f}%"}
+
+
+def detectar_liquidaciones_masivas(cierres, volumenes, ticker_24h, funding_rate):
+    """Proxy simple de presión de liquidaciones masivas usando impulso + volumen + funding."""
+    if len(cierres) < 3:
+        return {"detectado": False, "intensidad": "baja", "motivo": "Datos insuficientes"}
+
+    cambio_1 = ((cierres[-1] - cierres[-2]) / cierres[-2]) * 100
+    volumen_actual = volumenes[-1]
+    volumen_promedio = sum(volumenes[-3:]) / max(1, len(volumenes[-3:]))
+    spike_volumen = volumen_actual / max(volumen_promedio, 1)
+    cambio_24h = float(ticker_24h.get("priceChangePercent", 0)) if ticker_24h else 0.0
+    funding = float(funding_rate[0].get("fundingRate", 0)) if funding_rate and len(funding_rate) > 0 else 0.0
+
+    if abs(cambio_1) >= 1.2 and spike_volumen >= 1.8 and abs(cambio_24h) >= 1.5:
+        intensidad = "alta" if abs(cambio_1) >= 2.0 else "media"
+        return {"detectado": True, "intensidad": intensidad, "motivo": f"Impulso {cambio_1:.2f}% | volumen {spike_volumen:.2f}x | funding {funding:.6f}"}
+    return {"detectado": False, "intensidad": "baja", "motivo": "Sin presión clara de liquidaciones"}
+
+
+def calcular_ema_tradingview(precios_cierre, periodo=200):
+    if len(precios_cierre) < periodo:
+        return None
+    sma_inicial = sum(precios_cierre[:periodo]) / periodo
+    alpha = 2 / (periodo + 1)
+    ema = sma_inicial
+    for precio in precios_cierre[periodo:]:
+        ema = (precio * alpha) + (ema * (1 - alpha))
+    return ema
+
+
+def actualizar_operaciones_abiertas(cierres, datos, mercado):
+    global OPERACIONES_ABIERTAS, ESTADISTICAS
+
+    if not OPERACIONES_ABIERTAS:
+        return
+
+    precio_actual = cierres[-1]
+    nuevas_operaciones = []
+
+    for op in OPERACIONES_ABIERTAS:
+        if op["tipo"] == "COMPRA":
+            ganancia_pct = ((precio_actual - op["entrada"]) / op["entrada"]) * 100
+            if precio_actual <= op["stop_loss"]:
+                ESTADISTICAS["perdidas"] += 1
+                nuevas_operaciones.append((op, "perdida"))
+            elif precio_actual >= op["take_profit"]:
+                ESTADISTICAS["ganadas"] += 1
+                nuevas_operaciones.append((op, "ganada"))
+            else:
+                if ganancia_pct >= 10 and not op.get("aviso_10pct", False):
+                    op["aviso_10pct"] = True
+                    mensaje_profit = (
+                        f"📈 *AVISO DE CIERRE*\n\n"
+                        f"📊 Par: {op['mercado']}\n"
+                        f"🔹 Tipo: {op['tipo']}\n"
+                        f"💹 Beneficio actual: {ganancia_pct:.2f}%\n"
+                        f"💡 Se recomienda cerrar la operación si deseas tomar ganancias."
+                    )
+                    enviar_senal_telegram(mensaje_profit)
+                nuevas_operaciones.append((op, None))
+        else:
+            ganancia_pct = ((op["entrada"] - precio_actual) / op["entrada"]) * 100
+            if precio_actual >= op["stop_loss"]:
+                ESTADISTICAS["perdidas"] += 1
+                nuevas_operaciones.append((op, "perdida"))
+            elif precio_actual <= op["take_profit"]:
+                ESTADISTICAS["ganadas"] += 1
+                nuevas_operaciones.append((op, "ganada"))
+            else:
+                if ganancia_pct >= 10 and not op.get("aviso_10pct", False):
+                    op["aviso_10pct"] = True
+                    mensaje_profit = (
+                        f"📈 *AVISO DE CIERRE*\n\n"
+                        f"📊 Par: {op['mercado']}\n"
+                        f"🔹 Tipo: {op['tipo']}\n"
+                        f"💹 Beneficio actual: {ganancia_pct:.2f}%\n"
+                        f"💡 Se recomienda cerrar la operación si deseas tomar ganancias."
+                    )
+                    enviar_senal_telegram(mensaje_profit)
+                nuevas_operaciones.append((op, None))
+
+    OPERACIONES_ABIERTAS = [op for op, estado in nuevas_operaciones if estado is None]
+
+    for op, estado in nuevas_operaciones:
+        if estado is None:
+            continue
+        mensaje_cierre = (
+            f"🧾 *CIERRE DE OPERACIÓN*\n\n"
+            f"📊 Par: {op['mercado']}\n"
+            f"🔹 Tipo: {op['tipo']}\n"
+            f"💵 Entrada: $ {op['entrada']:,.2f}\n"
+            f"🛑 Stop: $ {op['stop_loss']:,.2f}\n"
+            f"🎯 Take Profit: $ {op['take_profit']:,.2f}\n"
+            f"✅ Resultado: {estado.upper()}"
+        )
+        enviar_senal_telegram(mensaje_cierre)
+
+
+def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
+    target_chat = chat_id or CHAT_ID_CANAL
     if not TOKEN_TELEGRAM or not target_chat:
+        print("⚠️ Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Render")
         return
 
     url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
+    # Enviar como texto plano para evitar errores de parseo de entidades
     payload = {"chat_id": target_chat, "text": mensaje}
-
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
+        print(f"➡️ Enviando mensaje a Telegram chat={target_chat} payload_len={len(mensaje)}")
         response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+            print(f"✅ Señal enviada a Telegram al chat {target_chat}")
+            return True, response.status_code, response.text
+        except Exception:
+            print(f"⚠️ Telegram devolvió status {response.status_code} al enviar a {target_chat}: {response.text}")
+            return False, response.status_code, response.text
     except Exception as e:
-        print(f"⚠️ Error enviando a {target_chat}: {e}")
+        print(f"⚠️ Error enviando señal a Telegram: {e}")
+        return False, None, str(e)
 
 
 def enviar_resumen_diario():
@@ -460,21 +932,8 @@ def registrar_senal_emitida(mercado, direccion, precio_actual, stop_loss, take_p
 
 
 def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
-    # Mantener el envío al canal como antes
     enviar_senal_telegram(senal["mensaje"], chat_id=chat_id)
-
-    # Envío adicional a todos los usuarios registrados
-    enviar_senal_a_canal_y_usuarios(senal["mensaje"])
-
-    registrar_senal_emitida(
-        senal["mercado"],
-        senal["direccion"],
-        senal["precio_actual"],
-        senal["stop_loss"],
-        senal["take_profit"],
-        senal["apalancamiento"],
-        tipo=tipo
-    )
+    registrar_senal_emitida(senal["mercado"], senal["direccion"], senal["precio_actual"], senal["stop_loss"], senal["take_profit"], senal["apalancamiento"], tipo=tipo)
 
 
 def enviar_boton_solicitud(chat_id=None):
@@ -589,20 +1048,8 @@ def telegram_listener():
                 if "message" in update:
                     message = update["message"]
                     chat_id = message.get("chat", {}).get("id")
-                    user = message.get("from", {})
-                    user_id = user.get("id")
-                    username = user.get("username")
-                    first_name = user.get("first_name")
+                    user_id = message.get("from", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
-
-                    if text == "/start":
-                        guardar_usuario_db(user_id)
-                        welcome = (
-                            "🦈 ¡Bienvenido a Club MarketSharks!\n\n"
-                            "Tu registro quedó guardado y ya recibirás las señales por chat privado."
-                        )
-                        enviar_senal_telegram(welcome, chat_id=user_id)
-
                     if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal", "!senal", "!senalahora"}:
                         generar_senal_manual(chat_id=chat_id, requester_id=user_id)
                     if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
