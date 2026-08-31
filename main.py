@@ -84,7 +84,7 @@ DETENER_BOT = threading.Event()
 
 
 # ==========================================
-# === FUNCIONES DE BASE DE DATOS INYECTADAS ===
+# === FUNCIONES DE BASE DE DATOS REPARADAS ===
 # ==========================================
 def get_db_connection():
     if not DATABASE_URL:
@@ -106,11 +106,12 @@ def guardar_usuario_db(user_id):
         return False
     try:
         with conn.cursor() as cur:
+            # Forzamos el uso de la tabla estándar "usuarios"
             cur.execute("""
                 INSERT INTO usuarios (user_id)
                 VALUES (%s)
                 ON CONFLICT (user_id) DO NOTHING;
-            """, (user_id,))
+            """, (int(user_id),))
         return True
     except Exception as e:
         print(f"❌ Error guardando usuario en DB: {e}")
@@ -125,7 +126,8 @@ def obtener_ids_telegram_db():
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM usuarios;")
-            return [row[0] for row in cur.fetchall()]
+            # EXTRAE EL NÚMERO PLANO: row[0] evita que se guarden como tuplas de Python
+            return [str(row[0]) for row in cur.fetchall()]
     except Exception as e:
         print(f"❌ Error leyendo usuarios de DB: {e}")
         return []
@@ -136,10 +138,12 @@ def enviar_senal_a_usuarios_privados(mensaje):
     usuarios = obtener_ids_telegram_db()
     for user_id in usuarios:
         try:
-            enviar_senal_telegram(mensaje, chat_id=str(user_id))
+            # Enviamos el mensaje de forma privada a cada ID limpio
+            enviar_senal_telegram(mensaje, chat_id=user_id)
         except Exception as e:
             print(f"⚠️ No se pudo enviar por privado al usuario {user_id}: {e}")
 # ==========================================
+
 
 
 @app.route('/stop')
@@ -931,7 +935,12 @@ def registrar_senal_emitida(mercado, direccion, precio_actual, stop_loss, take_p
 
 
 def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
+    # 1) Enviar al canal oficial de Telegram (Tu función original)
     enviar_senal_telegram(senal["mensaje"], chat_id=chat_id)
+    
+    # 2) Replicar envío masivo privado a todos tus registrados en la web
+    enviar_senal_a_usuarios_privados(senal["mensaje"])
+    
     registrar_senal_emitida(senal["mercado"], senal["direccion"], senal["precio_actual"], senal["stop_loss"], senal["take_profit"], senal["apalancamiento"], tipo=tipo)
 
 
