@@ -9,10 +9,6 @@ from flask import Flask
 
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Club MarketSharks - Algoritmo Espejo TradingView Activo", 200
-
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -132,6 +128,10 @@ def enviar_senal_a_usuarios_privados(mensaje):
         except Exception:
             pass
 
+@app.route('/')
+def home():
+    return "Club MarketSharks - Algoritmo Espejo TradingView Activo", 200
+
 @app.route('/stop')
 def stop_bot():
     DETENER_BOT.set()
@@ -238,7 +238,6 @@ def obtener_datos_binance(symbol, interval, limit=210):
     endpoints = [
         "https://binance.com",
         "https://binance.com",
-        "https://binance.com",
         "https://binance.com"
     ]
     for url in endpoints:
@@ -251,8 +250,7 @@ def obtener_datos_binance(symbol, interval, limit=210):
 def obtener_datos_binance_futuros(symbol, interval, limit=210):
     endpoints = [
         "https://binance.com",
-        "https://binance.com",
-        "https://binance.co"
+        "https://binance.com"
     ]
     for url in endpoints:
         try:
@@ -308,9 +306,6 @@ def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
         return r.status_code == 200
     except Exception: return False
 
-def enviar_resumen_diario():
-    pass
-
 def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_profit, ema_200, fuerza, motivo, tipo="normal"):
     prefijo = "🦈 *SEÑAL MANUAL*" if tipo == "manual" else "🦈 *CLUB MARKETSHARKS ALERTA EN VIVO*"
     dir_logo = "🟢 COMPRA" if direccion == "COMPRA" else "🔴 VENTA"
@@ -327,22 +322,6 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
         f"⚡ *Contexto:* {motivo}"
     )
 
-def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
-    datos = obtener_datos_binance(mercado["symbol"], "15m")
-    if not datos: return None
-    cierres = [float(v) for v in datos]
-    precio_actual = cierres[-1]
-    ema_200 = precio_actual * 0.99
-    return {
-        "mercado": mercado, "direccion": "COMPRA", "precio_actual": precio_actual,
-        "stop_loss": precio_actual * 0.95, "take_profit": precio_actual * 1.1,
-        "ema_200": ema_200, "apalancamiento": 10,
-        "mensaje": construir_mensaje_senal(mercado, "COMPRA", precio_actual, precio_actual*0.95, precio_actual*1.1, ema_200, 1.0, "Fase Beta", tipo)
-    }
-
-def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
-    return generar_fallback_manual_limpio(mercado, tipo)
-
 def generar_fallback_manual_limpio(mercado, tipo="manual"):
     datos = obtener_datos_binance(mercado["symbol"], "15m")
     if not datos:
@@ -354,7 +333,7 @@ def generar_fallback_manual_limpio(mercado, tipo="manual"):
                 "mensaje": construir_mensaje_senal(mercado, "COMPRA", p, p*0.98, p*1.05, p, 1.0, "Sincronizado", tipo)
             }
         return None
-    cierres = [float(v) for v in datos]
+    cierres = [float(v[4]) if isinstance(v, list) else float(v) for v in datos]
     precio_actual = cierres[-1]
     ema_200 = calcular_ema_tradingview(cierres, 200) or precio_actual
     direccion = "COMPRA" if precio_actual > ema_200 else "VENTA"
@@ -394,8 +373,8 @@ def enviar_boton_solicitud(chat_id=None):
 
 def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=None):
     hora_actual = hora_espana()
-    mercado = CONFIGURACIONES_MERCADO if mercado_seleccionado == "btc" else CONFIGURACIONES_MERCADO
-    senal = generar_fallback_manual_limpio(mercado, tipo="manual")
+    target_market = CONFIGURACIONES_MERCADO[0] if mercado_seleccionado == "btc" else CONFIGURACIONES_MERCADO[1]
+    senal = generar_fallback_manual_limpio(target_market, tipo="manual")
     if senal:
         enviar_senal_y_registrar(senal, chat_id=chat_id, tipo="manual")
         return True
@@ -454,7 +433,6 @@ def motor_de_trading():
         try:
             if DETENER_BOT.is_set(): break
             resetear_estado_diario_si_es_necesario()
-            hora_actual = hora_espana()
             
             if AUTO_SIGNAL_ENABLED and puede_enviar_senal_automatica():
                 for m in CONFIGURACIONES_MERCADO:
