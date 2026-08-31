@@ -6,7 +6,6 @@ import psycopg2
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
-from telegram import Update, ContextTypes
 
 app = Flask(__name__)
 
@@ -117,10 +116,17 @@ def get_db_connection():
 
 
 def guardar_usuario_db(user_id):
-    user_id = int(user_id)
+    if user_id is None:
+        return False
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return False
+
     conn = get_db_connection()
     if not conn:
         return False
+
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -159,9 +165,9 @@ def obtener_ids_telegram_db():
 
 def enviar_senal_a_canal_y_usuarios(mensaje):
     # 1) Canal principal
-    enviar_senal_telegram(mensaje, chat_id=TELEGRAM_CHAT_ID)
+    enviar_senal_telegram(mensaje, chat_id=CHAT_ID_CANAL)
 
-    # 2) Privados de la base de datos
+    # 2) Chat privado a todos los usuarios de la base de datos
     for user_id in obtener_ids_telegram_db():
         try:
             enviar_senal_telegram(mensaje, chat_id=user_id)
@@ -454,9 +460,21 @@ def registrar_senal_emitida(mercado, direccion, precio_actual, stop_loss, take_p
 
 
 def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
+    # Mantener el envío al canal como antes
     enviar_senal_telegram(senal["mensaje"], chat_id=chat_id)
-    enviar_senal_a_usuarios_db(senal["mensaje"])
-    registrar_senal_emitida(senal["mercado"], senal["direccion"], senal["precio_actual"], senal["stop_loss"], senal["take_profit"], senal["apalancamiento"], tipo=tipo)
+
+    # Envío adicional a todos los usuarios registrados
+    enviar_senal_a_canal_y_usuarios(senal["mensaje"])
+
+    registrar_senal_emitida(
+        senal["mercado"],
+        senal["direccion"],
+        senal["precio_actual"],
+        senal["stop_loss"],
+        senal["take_profit"],
+        senal["apalancamiento"],
+        tipo=tipo
+    )
 
 
 def enviar_boton_solicitud(chat_id=None):
@@ -581,8 +599,7 @@ def telegram_listener():
                         guardar_usuario_db(user_id)
                         welcome = (
                             "🦈 ¡Bienvenido a Club MarketSharks!\n\n"
-                            "Tu registro quedó guardado y ya recibirás las señales por chat privado.\n\n"
-                            "Pulsa el botón o escribe /senalbtc o /senalspx para pedir una señal manual."
+                            "Tu registro quedó guardado y ya recibirás las señales por chat privado."
                         )
                         enviar_senal_telegram(welcome, chat_id=user_id)
 
