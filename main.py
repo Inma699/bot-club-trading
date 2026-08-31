@@ -17,6 +17,9 @@ def home():
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Captura tu URI de Supabase
+# Fuerza el uso del Pooler IPv4 de Supabase para evitar el error "Network is unreachable"
+if DATABASE_URL and "supabase.co" in DATABASE_URL and "pooler" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("@db.", "@://supabase.com")
 
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
@@ -643,26 +646,23 @@ def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
     target_chat = chat_id or CHAT_ID_CANAL
     if not TOKEN_TELEGRAM or not target_chat:
         print("⚠️ Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Render")
-        return
+        return False, None, "Missing credentials"
 
-    url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
-    # Enviar como texto plano para evitar errores de parseo de entidades
-    payload = {"chat_id": target_chat, "text": mensaje}
+    # URL oficial de la API de Telegram fija sin concatenaciones raras
+    url = f"https://telegram.org{TOKEN_TELEGRAM}/sendMessage"
+    payload = {"chat_id": str(target_chat), "text": mensaje}
     if reply_markup:
         payload["reply_markup"] = reply_markup
+        
     try:
-        print(f"➡️ Enviando mensaje a Telegram chat={target_chat} payload_len={len(mensaje)}")
         response = requests.post(url, json=payload, timeout=10)
-        try:
-            response.raise_for_status()
-            print(f"✅ Señal enviada a Telegram al chat {target_chat}")
+        if response.status_code == 200:
             return True, response.status_code, response.text
-        except Exception:
-            print(f"⚠️ Telegram devolvió status {response.status_code} al enviar a {target_chat}: {response.text}")
-            return False, response.status_code, response.text
+        return False, response.status_code, response.text
     except Exception as e:
         print(f"⚠️ Error enviando señal a Telegram: {e}")
         return False, None, str(e)
+
 
 
 def enviar_resumen_diario():
@@ -1215,5 +1215,4 @@ if __name__ == '__main__':
     print("🌐 Iniciando servidor Flask en puerto Render...")
     puerto = int(os.getenv("PORT", 10000))
     app.run(host='0.0.0.0', port=puerto, use_reloader=False, threaded=True)
-
 
