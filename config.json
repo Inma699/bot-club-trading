@@ -1,1 +1,37 @@
-
+{
+    "max_open_trades": 1,
+    "stake_currency": "USDT",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "exchange": {
+        "name": "binance",
+        "key": "${FREQTRADE__EXCHANGE__KEY}",
+        "secret": "${FREQTRADE__EXCHANGE__SECRET}",
+        "pair_whitelist": [
+            "BTC/USDT"
+        ],
+        "pair_blacklist": []
+    },
+    "telegram": {
+        "enabled": true,
+        "token": "${FREQTRADE__TELEGRAM__TOKEN}",
+        "chat_id": "${TELEGRAM_CHANNEL_ID}",
+        "notification_settings": {
+            "status": "on",
+            "warning": "on",
+            "buy": "on",
+            "sell": "on",
+            "buy_fill": "on",
+            "sell_fill": "on"
+        }
+    },
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
+        "username": "admin",
+        "password": "ClubTrading2026*"
+    },
+    "bot_name": "CryptoBot_VIP_Signals",
+    "initial_state": "running"
+}
