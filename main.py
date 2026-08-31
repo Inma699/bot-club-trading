@@ -84,7 +84,7 @@ DETENER_BOT = threading.Event()
 
 
 # ==========================================
-# === FUNCIONES DE BASE DE DATOS REPARADAS ===
+# === FUNCIONES DE BASE DE DATOS DEFINITIVAS ===
 # ==========================================
 def get_db_connection():
     if not DATABASE_URL:
@@ -106,12 +106,12 @@ def guardar_usuario_db(user_id):
         return False
     try:
         with conn.cursor() as cur:
-            # Forzamos el uso de la tabla estándar "usuarios"
             cur.execute("""
                 INSERT INTO usuarios (user_id)
                 VALUES (%s)
                 ON CONFLICT (user_id) DO NOTHING;
             """, (int(user_id),))
+        print(f"✅ Usuario {user_id} guardado con éxito en Supabase.")
         return True
     except Exception as e:
         print(f"❌ Error guardando usuario en DB: {e}")
@@ -126,7 +126,7 @@ def obtener_ids_telegram_db():
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id FROM usuarios;")
-            # EXTRAE EL NÚMERO PLANO: row[0] evita que se guarden como tuplas de Python
+            # CORRECCIÓN CRÍTICA: row[0] extrae el número limpio de la tupla (ej: 123456)
             return [str(row[0]) for row in cur.fetchall()]
     except Exception as e:
         print(f"❌ Error leyendo usuarios de DB: {e}")
@@ -136,9 +136,9 @@ def obtener_ids_telegram_db():
 
 def enviar_senal_a_usuarios_privados(mensaje):
     usuarios = obtener_ids_telegram_db()
+    print(f"📢 Iniciando envío privado a {len(usuarios)} usuarios registrados.")
     for user_id in usuarios:
         try:
-            # Enviamos el mensaje de forma privada a cada ID limpio
             enviar_senal_telegram(mensaje, chat_id=user_id)
         except Exception as e:
             print(f"⚠️ No se pudo enviar por privado al usuario {user_id}: {e}")
