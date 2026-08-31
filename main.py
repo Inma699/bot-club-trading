@@ -1039,6 +1039,19 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
 def telegram_listener():
     if not TOKEN_TELEGRAM:
         return
+    
+    # 🚨 INYECTADO: Forzar a Telegram a limpiar el webhook fantasma y actualizaciones atascadas
+    try:
+        print("🧹 Forzando limpieza de Webhook y desatascando mensajes antiguos en Telegram...")
+        url_clear = f"https://telegram.org{TOKEN_TELEGRAM}/deleteWebhook"
+        requests.post(url_clear, json={"drop_pending_updates": True}, timeout=10)
+        print("✅ Conexión con Telegram desatascada y lista.")
+    except Exception as e:
+        print(f"⚠️ No se pudo limpiar el Webhook de forma automática: {e}")
+
+    offset = None
+    while True:
+
     offset = None
     while True:
         try:
