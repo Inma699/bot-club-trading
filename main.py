@@ -2,7 +2,7 @@ import os
 import threading
 import time
 import requests
-import psycopg2  # <=== INYECTADO: Conector nativo de base de datos
+import psycopg2  # Conector nativo de base de datos para Supabase
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
@@ -16,7 +16,7 @@ def home():
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # <=== INYECTADO: Captura tu URI de Supabase
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()  # Captura tu URI de Supabase
 
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
@@ -136,8 +136,7 @@ def enviar_senal_a_usuarios_privados(mensaje):
     usuarios = obtener_ids_telegram_db()
     for user_id in usuarios:
         try:
-            # Reutiliza tu función nativa de envío de Telegram
-            enviar_senal_telegram(mensaje, chat_id=user_id)
+            enviar_senal_telegram(mensaje, chat_id=str(user_id))
         except Exception as e:
             print(f"⚠️ No se pudo enviar por privado al usuario {user_id}: {e}")
 # ==========================================
@@ -274,9 +273,9 @@ def obtener_datos_bitget(symbol, interval, limit=210):
                     if isinstance(inner, list):
                         return inner
                     if isinstance(inner, dict):
-
                         if "candles" in inner and isinstance(inner["candles"], list):
                             return inner["candles"]
+
                 if "candles" in data and isinstance(data["candles"], list):
                     return data["candles"]
                 if isinstance(data, list):
