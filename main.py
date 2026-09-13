@@ -1,6 +1,6 @@
 import os
 import asyncio
-import yfinance as yf
+import requests
 from dotenv import load_dotenv
 from telegram import Bot
 import google.genai as google_ai
@@ -16,7 +16,7 @@ app = FastAPI(title="Shark Small Cap Scanner Cloud")
 bot_telegram = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 client_gemini = google_ai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# LISTA EXPANDIDA: 30 Small Caps de Máxima Volatilidad y Catalizadores
+# LISTA MAESTRA: 30 Small Caps de Máxima Volatilidad y Catalizadores
 WANTED_LIST = [
     # Inteligencia Artificial y Robótica
     "SOUN", "SERV", "BBAI", "AUST", "RGTI",
@@ -45,59 +45,68 @@ async def enviar_telegram(mensaje):
     except Exception as e:
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
-def obtener_datos_e_historico_noticias(ticker):
-    """Extrae datos camuflándose como navegador para evitar bloqueos en la nube."""
-    accion = yf.Ticker(ticker)
+def obtener_datos_antubloqueo(ticker):
+    """Extrae datos numéricos y noticias usando peticiones HTTP directas blindadas."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+    }
     
-    # Cabecera de agente de usuario para simular Google Chrome real
-    yf.utils.requests_session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    })
+    # 1. Recuperación de precio y estadísticas de volumen mediante la API de cotizaciones rápidas
+    url_quote = f"https://yahoo.com{ticker}"
+    precio, market_cap, volumen_actual, volumen_medio = 0, 0, 0, 1
     
-    # Capturar noticias del ticker de forma directa
-    noticias = accion.news
-    titulares = []
-    if noticias:
-        for n in noticias[:4]:
-            titulares.append(f"- TÍTULO: {n.get('title')} | RESUMEN: {n.get('snippet', 'Sin resumen')}")
-    
-    texto_noticias = "\n".join(titulares) if titulares else "Sin noticias publicadas recientemente."
-    
-    # Extraer métricas financieras con sistema de contingencia contra bloqueos de IP
     try:
-        info_rapida = accion.fast_info
-        precio = info_rapida.get("last_price", 0)
-        market_cap = info_rapida.get("market_cap", 0)
-        volumen_actual = info_rapida.get("last_volume", 0)
-        volumen_medio = info_rapida.get("three_month_average_volume", 1)
-    except:
-        info_lenta = accion.info
-        precio = info_lenta.get("currentPrice", 0)
-        market_cap = info_lenta.get("marketCap", 0)
-        volumen_actual = info_lenta.get("volume", 0)
-        volumen_medio = info_lenta.get("averageVolume", 1)
+        response = requests.get(url_quote, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            result = data.get("quoteResponse", {}).get("result", [])
+            if result:
+                res = result[0]
+                precio = res.get("regularMarketPrice", 0)
+                market_cap = res.get("marketCap", 0)
+                volumen_actual = res.get("regularMarketVolume", 0)
+                volumen_medio = res.get("averageDailyVolume3Month", 1)
+    except Exception as e:
+        print(f"⚠️ Alerta en cotización de {ticker}: {e}")
+
+    # 2. Recuperación de prensa mediante la API de noticias de Yahoo
+    url_news = f"https://yahoo.com{ticker}&newsCount=4"
+    titulares = []
+    
+    try:
+        response_news = requests.get(url_news, headers=headers, timeout=10)
+        if response_news.status_code == 200:
+            data_news = response_news.json()
+            news_list = data_news.get("news", [])
+            for n in news_list:
+                titulares.append(f"- TÍTULO: {n.get('title')} | RESUMEN: {n.get('uuid', 'Análisis de mercado')}")
+    except Exception as e:
+        print(f"⚠️ Alerta en noticias de {ticker}: {e}")
+        
+    texto_noticias = "\n".join(titulares) if titulares else "Sin noticias publicadas recientemente."
     
     return {
         "Nombre": ticker,
         "Precio": precio,
         "MarketCap": market_cap,
-        "Float": "Bajo (Estructura Small Cap)",
+        "Float": "Estructura Small Cap (Bajo Float)",
         "Volumen_Actual": volumen_actual,
         "Volumen_Medio": volumen_medio,
         "Noticias": texto_noticias
     }
 
 async def tarea_escanear_mercado():
-    """Bucle persistente en segundo plano que analiza los 30 tickers en Render."""
+    """Bucle persistente en segundo plano que analiza los 30 tickers en la nube sin cortes."""
     while True:
         print(f"🚀 [NUBE] Iniciando radar de catalizadores para {len(WANTED_LIST)} empresas...")
         
         for ticker in WANTED_LIST:
             try:
-                datos = obtener_datos_e_historico_noticias(ticker)
+                datos = obtener_datos_antubloqueo(ticker)
                 
-                # Si no hay prensa que evaluar, saltamos inmediatamente para ahorrar cuota
-                if datos["Noticias"] == "Sin noticias publicadas recientemente.":
+                # Si las APIs devolvieron datos vacíos o no hay prensa, pasamos de largo de forma segura
+                if datos["Noticias"] == "Sin noticias publicadas recientemente." or datos["Precio"] == 0:
                     continue
                 
                 prompt = (
@@ -106,7 +115,7 @@ async def tarea_escanear_mercado():
                     f"Analiza si los siguientes titulares de prensa recientes contienen un CATALIZADOR DE IMPACTO MASIVO "
                     f"capaz de multiplicar el precio por 10 (+1,000%) debido a su baja capitalización de mercado:\n"
                     f"{datos['Noticias']}\n\n"
-                    f"¿Qué buscamos?: Aprobaciones FDA, contratos históricos con el Gobierno/NASA, alianzas comerciales masivas con "
+                    f"¿Qué buscamos?: Aprobaciones FDA, contratos históricos con el Gobierno o la NASA, alianzas comerciales masivas con "
                     f"gigantes Big Tech (Nvidia, Microsoft, Apple) o fusiones corporativas estratégicas de gran valor.\n\n"
                     f"REGLA DE ORO: Si las noticias son análisis ordinarios, movimientos del mercado de rutina, opiniones o reportes comunes, "
                     f"responde ÚNICAMENTE con la palabra: OMITIR.\n\n"
@@ -127,14 +136,14 @@ async def tarea_escanear_mercado():
                     print(f"🔥 ¡ALERTA MÁXIMA EN {ticker}! Distribuyendo señal a Telegram...")
                     await enviar_telegram(veredicto)
                 
-                # Pausa de 6 segundos entre acciones. Evita que Google nos aplique un ban por velocidad en el plan gratuito
-                await asyncio.sleep(6)
+                # Pausa de 5 segundos entre acciones para cumplir los requerimientos de la API de Google
+                await asyncio.sleep(5)
                 
             except Exception as e:
                 print(f"⚠️ Error procesando la empresa {ticker}: {e}")
         
         print("💤 Escáner de 30 tickers completado. Durmiendo 15 minutos en la nube...")
-        await asyncio.sleep(900)  # 900 segundos = Esperar 15 minutos para la próxima ronda
+        await asyncio.sleep(900)  # Esperar 15 minutos para la próxima ronda
 
 @app.on_event("startup")
 async def inicio_servidor():
@@ -143,5 +152,5 @@ async def inicio_servidor():
 
 @app.get("/")
 def ruta_salud():
-    """Ruta de control web obligatoria para que Render verifique que el bot no se ha congelado."""
+    """Ruta de control web obligatoria para que Render verifique que el bot sigue vivo."""
     return {"status": "online", "club": "ClubMSharks", "monitored_tickers": len(WANTED_LIST)}
