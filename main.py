@@ -1,7 +1,7 @@
 import os
 import asyncio
 import requests
-import xml.etree.ElementTree as ET
+import re
 from dotenv import load_dotenv
 from telegram import Bot
 import google.genai as google_ai
@@ -46,8 +46,8 @@ async def enviar_telegram(mensaje):
     except Exception as e:
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
-def obtener_noticias_rss_blindado(ticker):
-    """Extrae la prensa usando canales RSS públicos purificando caracteres inválidos."""
+def obtener_noticias_texto_plano(ticker):
+    """Extrae las noticias usando expresiones regulares sobre el texto plano, evitando errores de XML."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     }
@@ -59,34 +59,31 @@ def obtener_noticias_rss_blindado(ticker):
     try:
         response = requests.get(url_base, headers=headers, params=parametros, timeout=12)
         if response.status_code == 200:
-            # Reemplazamos entidades conflictivas comunes de los feeds XML de Yahoo antes del parseo
-            xml_limpio = response.text.replace("&amp;", "&").replace("&", "&amp;")
-            raw_bytes = xml_limpio.encode('utf-8', errors='ignore')
+            texto = response.text
+            # Buscamos las etiquetas <title> dentro del texto sin usar un lector estricto de XML
+            matches = re.findall(r'<title>(.*?)</title>', texto)
             
-            root = ET.fromstring(raw_bytes)
-            for item in root.findall('.//item')[:4]:
-                title = item.find('title')
-                description = item.find('description')
+            # El primer match suele ser el título del feed global (ej: "Yahoo Finance: SOUN"), lo saltamos
+            for title in matches[1:5]:
+                # Limpieza rápida de etiquetas basura si las hubiera
+                title_limpio = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', title)
+                titulares.append(f"- TÍTULO: {title_limpio}")
                 
-                title_txt = title.text if title is not None else "Sin título"
-                desc_txt = description.text if description is not None else "Sin descripción"
-                
-                titulares.append(f"- TÍTULO: {title_txt} | RESUMEN: {desc_txt}")
     except Exception as e:
-        print(f"⚠️ Alerta leyendo canal RSS para {ticker}: {e}")
+        print(f"⚠️ Error de lectura de texto en {ticker}: {e}")
         
     texto_noticias = "\n".join(titulares) if titulares else "Sin noticias publicadas recientemente."
     return texto_noticias
 
 async def tarea_escanear_mercado():
-    """Bucle de escaneo en la nube sin bloqueos de red."""
+    """Bucle de escaneo continuo en la nube basado en extracción segura por texto plano."""
     while True:
-        print(f"🚀 [NUBE ESPAÑA] Iniciando radar RSS corregido para {len(WANTED_LIST)} empresas...")
+        print(f"🚀 [NUBE ESPAÑA] Radar robusto activado para {len(WANTED_LIST)} empresas...")
         
         for ticker in WANTED_LIST:
             try:
-                print(f"📡 Extrayendo prensa via RSS para {ticker}...")
-                noticias_empresa = obtener_noticias_rss_blindado(ticker)
+                print(f"📡 Buscando prensa para {ticker}...")
+                noticias_empresa = obtener_noticias_texto_plano(ticker)
                 
                 if noticias_empresa == "Sin noticias publicadas recientemente.":
                     continue
@@ -94,12 +91,12 @@ async def tarea_escanear_mercado():
                 prompt = (
                     f"Actúa como un gestor de fondos de cobertura institucional (Hedge Fund) experto en microcaps y momentum violento.\n"
                     f"Evaluamos la empresa {ticker}.\n\n"
-                    f"Analiza si los siguientes titulares de prensa de la red RSS contienen un CATALIZADOR DE IMPACTO MASIVO "
+                    f"Analiza si los siguientes titulares de prensa contienen un CATALIZADOR DE IMPACTO MASIVO "
                     f"capaz de multiplicar el precio por 10 (+1,000%) debido a su baja capitalización de mercado:\n"
                     f"{noticias_empresa}\n\n"
-                    f"¿Qué buscamos?: Aprobaciones FDA, contratos millonarios con gobiernos o agencias espaciales, alianzas de "
-                    f"desarrollo masivo con gigantes Big Tech (Nvidia, Microsoft, Apple) o adquisiciones directas.\n\n"
-                    f"REGLA DE ORO: Si las noticias son análisis ordinarios, movimientos diarios de rutina o blogs de opinión, "
+                    f"¿Qué buscamos de forma estricta?: Aprobaciones regulatorias FDA, contratos millonarios con gobiernos o agencias "
+                    f"espaciales, alianzas de desarrollo masivo con gigantes Big Tech (Nvidia, Microsoft, Apple) o adquisiciones directas.\n\n"
+                    f"REGLA DE ORO: Si las noticias son análisis ordinarios, movimientos diarios comunes, resúmenes semanales de rutina o blogs de opinión, "
                     f"responde ÚNICAMENTE con la palabra: OMITIR.\n\n"
                     f"Si califica para una explosión potencial masiva, redacta una ALERTA CRÍTICA PARA CLUBMSHARKS indicando de forma detallada el catalizador, "
                     f"los puntos clave del informe y un plan de acción sugerido para ejecutar entradas de momentum en tu terminal DAS Trader Pro. Usa formato Markdown limpio con emojis."
@@ -118,21 +115,21 @@ async def tarea_escanear_mercado():
                     print(f"🔥 ¡CATALIZADOR DE ALTO IMPACTO EN {ticker}! Distribuyendo señal a Telegram...")
                     await enviar_telegram(veredicto)
                 
-                # Pausa estratégica para proteger el volumen de llamadas de la API de Google
+                # Pausa reglamentaria para proteger las llamadas gratuitas de Gemini
                 await asyncio.sleep(6)
                 
             except Exception as e:
                 print(f"⚠️ Error procesando la consulta en {ticker}: {e}")
         
-        print("💤 Ronda de 30 tickers completada sin errores de red. Durmiendo 15 minutos en la nube...")
+        print("💤 Ronda de 30 tickers completada sin errores. Durmiendo 15 minutos en la nube...")
         await asyncio.sleep(900)
 
 @app.on_event("startup")
 async def inicio_servidor():
-    """Ejecuta el bucle de escaneo automático una vez levantado el entorno web en Render."""
+    """Lanza la tarea en segundo plano al arrancar la app web."""
     asyncio.create_task(tarea_escanear_mercado())
 
 @app.get("/")
 def ruta_salud():
-    """Ruta web de verificación obligatoria para que los servidores de Render no apaguen el bot."""
-    return {"status": "online", "tracker": "RSS Corregido ClubMSharks", "monitored_tickers": len(WANTED_LIST)}
+    """Control de vida del Web Service de Render."""
+    return {"status": "online", "tracker": "Regex Plain-Text Blindado", "monitored_tickers": len(WANTED_LIST)}
