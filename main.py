@@ -47,12 +47,11 @@ async def enviar_telegram(mensaje):
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
 def obtener_noticias_rss_blindado(ticker):
-    """Extrae la prensa usando canales RSS públicos utilizando paso de parámetros limpio."""
+    """Extrae la prensa usando canales RSS públicos purificando caracteres inválidos."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     }
     
-    # Separamos completamente la URL base de los parámetros para evitar mezclas en Linux
     url_base = "https://yahoo.com"
     parametros = {"s": str(ticker).strip().upper()}
     titulares = []
@@ -60,7 +59,11 @@ def obtener_noticias_rss_blindado(ticker):
     try:
         response = requests.get(url_base, headers=headers, params=parametros, timeout=12)
         if response.status_code == 200:
-            root = ET.fromstring(response.text)
+            # Reemplazamos entidades conflictivas comunes de los feeds XML de Yahoo antes del parseo
+            xml_limpio = response.text.replace("&amp;", "&").replace("&", "&amp;")
+            raw_bytes = xml_limpio.encode('utf-8', errors='ignore')
+            
+            root = ET.fromstring(raw_bytes)
             for item in root.findall('.//item')[:4]:
                 title = item.find('title')
                 description = item.find('description')
@@ -92,7 +95,7 @@ async def tarea_escanear_mercado():
                     f"Actúa como un gestor de fondos de cobertura institucional (Hedge Fund) experto en microcaps y momentum violento.\n"
                     f"Evaluamos la empresa {ticker}.\n\n"
                     f"Analiza si los siguientes titulares de prensa de la red RSS contienen un CATALIZADOR DE IMPACTO MASIVO "
-                    f"capas de multiplicar el precio por 10 (+1,000%) debido a su baja capitalización de mercado:\n"
+                    f"capaz de multiplicar el precio por 10 (+1,000%) debido a su baja capitalización de mercado:\n"
                     f"{noticias_empresa}\n\n"
                     f"¿Qué buscamos?: Aprobaciones FDA, contratos millonarios con gobiernos o agencias espaciales, alianzas de "
                     f"desarrollo masivo con gigantes Big Tech (Nvidia, Microsoft, Apple) o adquisiciones directas.\n\n"
