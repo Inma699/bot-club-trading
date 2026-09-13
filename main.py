@@ -47,21 +47,21 @@ async def enviar_telegram(mensaje):
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
 def obtener_noticias_rss_blindado(ticker):
-    """Extrae la prensa usando canales RSS públicos abiertos, imposibles de bloquear en la nube."""
+    """Extrae la prensa usando canales RSS públicos utilizando paso de parámetros limpio."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     }
     
-    # El feed RSS público no pasa por los filtros restrictivos anti-bots de Yahoo
-    url_rss = f"https://yahoo.com{ticker}"
+    # Separamos completamente la URL base de los parámetros para evitar mezclas en Linux
+    url_base = "https://yahoo.com"
+    parametros = {"s": str(ticker).strip().upper()}
     titulares = []
     
     try:
-        response = requests.get(url_rss, headers=headers, timeout=12)
+        response = requests.get(url_base, headers=headers, params=parametros, timeout=12)
         if response.status_code == 200:
-            # Parseamos el XML devuelto por el RSS público
             root = ET.fromstring(response.text)
-            for item in root.findall('.//item')[:4]:  # Extraer los 4 titulares más frescos
+            for item in root.findall('.//item')[:4]:
                 title = item.find('title')
                 description = item.find('description')
                 
@@ -76,28 +76,27 @@ def obtener_noticias_rss_blindado(ticker):
     return texto_noticias
 
 async def tarea_escanear_mercado():
-    """Bucle persistente en la nube. Escanea los catalizadores usando canales RSS abiertos."""
+    """Bucle de escaneo en la nube sin bloqueos de red."""
     while True:
-        print(f"🚀 [NUBE ESPAÑA] Iniciando radar RSS blindado para {len(WANTED_LIST)} empresas...")
+        print(f"🚀 [NUBE ESPAÑA] Iniciando radar RSS corregido para {len(WANTED_LIST)} empresas...")
         
         for ticker in WANTED_LIST:
             try:
                 print(f"📡 Extrayendo prensa via RSS para {ticker}...")
                 noticias_empresa = obtener_noticias_rss_blindado(ticker)
                 
-                # Si está vacío o no hay novedades, saltamos la empresa de forma segura
                 if noticias_empresa == "Sin noticias publicadas recientemente.":
                     continue
                 
                 prompt = (
                     f"Actúa como un gestor de fondos de cobertura institucional (Hedge Fund) experto en microcaps y momentum violento.\n"
                     f"Evaluamos la empresa {ticker}.\n\n"
-                    f"Analiza si los siguientes titulares de prensa recientes de la red RSS contienen un CATALIZADOR DE IMPACTO MASIVO "
-                    f"capaz de multiplicar el precio por 10 (+1,000%) debido a su baja capitalización de mercado:\n"
+                    f"Analiza si los siguientes titulares de prensa de la red RSS contienen un CATALIZADOR DE IMPACTO MASIVO "
+                    f"capas de multiplicar el precio por 10 (+1,000%) debido a su baja capitalización de mercado:\n"
                     f"{noticias_empresa}\n\n"
-                    f"¿Qué buscamos de forma estricta?: Aprobaciones regulatorias FDA, contratos millonarios con gobiernos o agencias "
-                    f"espaciales, alianzas de desarrollo masivo con gigantes Big Tech (Nvidia, Microsoft, Apple) o adquisiciones directas.\n\n"
-                    f"REGLA DE ORO: Si las noticias son análisis ordinarios, movimientos diarios comunes, resúmenes semanales de rutina o blogs de opinión, "
+                    f"¿Qué buscamos?: Aprobaciones FDA, contratos millonarios con gobiernos o agencias espaciales, alianzas de "
+                    f"desarrollo masivo con gigantes Big Tech (Nvidia, Microsoft, Apple) o adquisiciones directas.\n\n"
+                    f"REGLA DE ORO: Si las noticias son análisis ordinarios, movimientos diarios de rutina o blogs de opinión, "
                     f"responde ÚNICAMENTE con la palabra: OMITIR.\n\n"
                     f"Si califica para una explosión potencial masiva, redacta una ALERTA CRÍTICA PARA CLUBMSHARKS indicando de forma detallada el catalizador, "
                     f"los puntos clave del informe y un plan de acción sugerido para ejecutar entradas de momentum en tu terminal DAS Trader Pro. Usa formato Markdown limpio con emojis."
@@ -122,7 +121,7 @@ async def tarea_escanear_mercado():
             except Exception as e:
                 print(f"⚠️ Error procesando la consulta en {ticker}: {e}")
         
-        print("💤 Ronda de 30 tickers completada sin bloqueos. Durmiendo 15 minutos en la nube...")
+        print("💤 Ronda de 30 tickers completada sin errores de red. Durmiendo 15 minutos en la nube...")
         await asyncio.sleep(900)
 
 @app.on_event("startup")
@@ -133,4 +132,4 @@ async def inicio_servidor():
 @app.get("/")
 def ruta_salud():
     """Ruta web de verificación obligatoria para que los servidores de Render no apaguen el bot."""
-    return {"status": "online", "tracker": "RSS Blindado ClubMSharks", "monitored_tickers": len(WANTED_LIST)}
+    return {"status": "online", "tracker": "RSS Corregido ClubMSharks", "monitored_tickers": len(WANTED_LIST)}
