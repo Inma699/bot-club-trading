@@ -45,19 +45,21 @@ async def enviar_telegram(mensaje):
     except Exception as e:
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
-def obtener_datos_antubloqueo(ticker):
-    """Extrae datos numéricos y noticias usando peticiones HTTP directas blindadas."""
+def obtener_datos_antibloqueo(ticker):
+    """Extrae datos numéricos y noticias usando peticiones HTTP directas bien formateadas."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json'
     }
     
-    # 1. Recuperación de precio y estadísticas de volumen mediante la API de cotizaciones rápidas
-    url_quote = f"https://yahoo.com{ticker}"
+    # 1. Recuperación de precio y estadísticas de volumen (Rutas Web Corregidas)
+    url_quote = "https://yahoo.com"
+    params_quote = {"symbols": ticker}
+    
     precio, market_cap, volumen_actual, volumen_medio = 0, 0, 0, 1
     
     try:
-        response = requests.get(url_quote, headers=headers, timeout=10)
+        response = requests.get(url_quote, headers=headers, params=params_quote, timeout=10)
         if response.status_code == 200:
             data = response.json()
             result = data.get("quoteResponse", {}).get("result", [])
@@ -70,12 +72,13 @@ def obtener_datos_antubloqueo(ticker):
     except Exception as e:
         print(f"⚠️ Alerta en cotización de {ticker}: {e}")
 
-    # 2. Recuperación de prensa mediante la API de noticias de Yahoo
-    url_news = f"https://yahoo.com{ticker}&newsCount=4"
+    # 2. Recuperación de prensa mediante el motor de búsqueda estructurado
+    url_news = "https://yahoo.com"
+    params_news = {"q": ticker, "newsCount": 4}
     titulares = []
     
     try:
-        response_news = requests.get(url_news, headers=headers, timeout=10)
+        response_news = requests.get(url_news, headers=headers, params=params_news, timeout=10)
         if response_news.status_code == 200:
             data_news = response_news.json()
             news_list = data_news.get("news", [])
@@ -103,7 +106,7 @@ async def tarea_escanear_mercado():
         
         for ticker in WANTED_LIST:
             try:
-                datos = obtener_datos_antubloqueo(ticker)
+                datos = obtener_datos_antibloqueo(ticker)
                 
                 # Si las APIs devolvieron datos vacíos o no hay prensa, pasamos de largo de forma segura
                 if datos["Noticias"] == "Sin noticias publicadas recientemente." or datos["Precio"] == 0:
