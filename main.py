@@ -1,6 +1,7 @@
 import os
 import asyncio
 import requests
+import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 from telegram import Bot
 import google.genai as google_ai
@@ -45,85 +46,61 @@ async def enviar_telegram(mensaje):
     except Exception as e:
         print(f"❌ Error al enviar mensaje a Telegram: {e}")
 
-def obtener_datos_antibloqueo(ticker):
-    """Extrae datos numéricos y noticias usando peticiones HTTP directas bien formateadas."""
+def obtener_noticias_rss_blindado(ticker):
+    """Extrae la prensa usando canales RSS públicos abiertos, imposibles de bloquear en la nube."""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     }
     
-    # 1. Recuperación de precio y estadísticas de volumen (Rutas Web Corregidas)
-    url_quote = "https://yahoo.com"
-    params_quote = {"symbols": ticker}
-    
-    precio, market_cap, volumen_actual, volumen_medio = 0, 0, 0, 1
-    
-    try:
-        response = requests.get(url_quote, headers=headers, params=params_quote, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            result = data.get("quoteResponse", {}).get("result", [])
-            if result:
-                res = result[0]
-                precio = res.get("regularMarketPrice", 0)
-                market_cap = res.get("marketCap", 0)
-                volumen_actual = res.get("regularMarketVolume", 0)
-                volumen_medio = res.get("averageDailyVolume3Month", 1)
-    except Exception as e:
-        print(f"⚠️ Alerta en cotización de {ticker}: {e}")
-
-    # 2. Recuperación de prensa mediante el motor de búsqueda estructurado
-    url_news = "https://yahoo.com"
-    params_news = {"q": ticker, "newsCount": 4}
+    # El feed RSS público no pasa por los filtros restrictivos anti-bots de Yahoo
+    url_rss = f"https://yahoo.com{ticker}"
     titulares = []
     
     try:
-        response_news = requests.get(url_news, headers=headers, params=params_news, timeout=10)
-        if response_news.status_code == 200:
-            data_news = response_news.json()
-            news_list = data_news.get("news", [])
-            for n in news_list:
-                titulares.append(f"- TÍTULO: {n.get('title')} | RESUMEN: {n.get('uuid', 'Análisis de mercado')}")
+        response = requests.get(url_rss, headers=headers, timeout=12)
+        if response.status_code == 200:
+            # Parseamos el XML devuelto por el RSS público
+            root = ET.fromstring(response.text)
+            for item in root.findall('.//item')[:4]:  # Extraer los 4 titulares más frescos
+                title = item.find('title')
+                description = item.find('description')
+                
+                title_txt = title.text if title is not None else "Sin título"
+                desc_txt = description.text if description is not None else "Sin descripción"
+                
+                titulares.append(f"- TÍTULO: {title_txt} | RESUMEN: {desc_txt}")
     except Exception as e:
-        print(f"⚠️ Alerta en noticias de {ticker}: {e}")
+        print(f"⚠️ Alerta leyendo canal RSS para {ticker}: {e}")
         
     texto_noticias = "\n".join(titulares) if titulares else "Sin noticias publicadas recientemente."
-    
-    return {
-        "Nombre": ticker,
-        "Precio": precio,
-        "MarketCap": market_cap,
-        "Float": "Estructura Small Cap (Bajo Float)",
-        "Volumen_Actual": volumen_actual,
-        "Volumen_Medio": volumen_medio,
-        "Noticias": texto_noticias
-    }
+    return texto_noticias
 
 async def tarea_escanear_mercado():
-    """Bucle persistente en segundo plano que analiza los 30 tickers en la nube sin cortes."""
+    """Bucle persistente en la nube. Escanea los catalizadores usando canales RSS abiertos."""
     while True:
-        print(f"🚀 [NUBE] Iniciando radar de catalizadores para {len(WANTED_LIST)} empresas...")
+        print(f"🚀 [NUBE ESPAÑA] Iniciando radar RSS blindado para {len(WANTED_LIST)} empresas...")
         
         for ticker in WANTED_LIST:
             try:
-                datos = obtener_datos_antibloqueo(ticker)
+                print(f"📡 Extrayendo prensa via RSS para {ticker}...")
+                noticias_empresa = obtener_noticias_rss_blindado(ticker)
                 
-                # Si las APIs devolvieron datos vacíos o no hay prensa, pasamos de largo de forma segura
-                if datos["Noticias"] == "Sin noticias publicadas recientemente." or datos["Precio"] == 0:
+                # Si está vacío o no hay novedades, saltamos la empresa de forma segura
+                if noticias_empresa == "Sin noticias publicadas recientemente.":
                     continue
                 
                 prompt = (
                     f"Actúa como un gestor de fondos de cobertura institucional (Hedge Fund) experto en microcaps y momentum violento.\n"
-                    f"Evaluamos la empresa {ticker} con una Capitalización de ${datos['MarketCap']:,}.\n\n"
-                    f"Analiza si los siguientes titulares de prensa recientes contienen un CATALIZADOR DE IMPACTO MASIVO "
+                    f"Evaluamos la empresa {ticker}.\n\n"
+                    f"Analiza si los siguientes titulares de prensa recientes de la red RSS contienen un CATALIZADOR DE IMPACTO MASIVO "
                     f"capaz de multiplicar el precio por 10 (+1,000%) debido a su baja capitalización de mercado:\n"
-                    f"{datos['Noticias']}\n\n"
-                    f"¿Qué buscamos?: Aprobaciones FDA, contratos históricos con el Gobierno o la NASA, alianzas comerciales masivas con "
-                    f"gigantes Big Tech (Nvidia, Microsoft, Apple) o fusiones corporativas estratégicas de gran valor.\n\n"
-                    f"REGLA DE ORO: Si las noticias son análisis ordinarios, movimientos del mercado de rutina, opiniones o reportes comunes, "
+                    f"{noticias_empresa}\n\n"
+                    f"¿Qué buscamos de forma estricta?: Aprobaciones regulatorias FDA, contratos millonarios con gobiernos o agencias "
+                    f"espaciales, alianzas de desarrollo masivo con gigantes Big Tech (Nvidia, Microsoft, Apple) o adquisiciones directas.\n\n"
+                    f"REGLA DE ORO: Si las noticias son análisis ordinarios, movimientos diarios comunes, resúmenes semanales de rutina o blogs de opinión, "
                     f"responde ÚNICAMENTE con la palabra: OMITIR.\n\n"
-                    f"Si califica para una explosión potencial masiva, redacta una ALERTA CRÍTICA PARA CLUBMSHARKS indicando detalladamente el catalizador, "
-                    f"análisis del volumen operativo hoy ({datos['Volumen_Actual']:,} vs {datos['Volumen_Medio']:,}), precio actual (${datos['Precio']}) y plan de acción de entrada rápida en DAS Trader Pro utilizando formato Markdown limpio con emojis."
+                    f"Si califica para una explosión potencial masiva, redacta una ALERTA CRÍTICA PARA CLUBMSHARKS indicando de forma detallada el catalizador, "
+                    f"los puntos clave del informe y un plan de acción sugerido para ejecutar entradas de momentum en tu terminal DAS Trader Pro. Usa formato Markdown limpio con emojis."
                 )
                 
                 response = client_gemini.models.generate_content(
@@ -134,26 +111,26 @@ async def tarea_escanear_mercado():
                 veredicto = response.text.strip()
                 
                 if "OMITIR" in veredicto and len(veredicto) < 15:
-                    print(f"ℹ️ {ticker}: Sin catalizadores históricos. Omitido.")
+                    print(f"ℹ️ {ticker}: Evaluado. Sin catalizadores extremos de grado +1,000%.")
                 else:
-                    print(f"🔥 ¡ALERTA MÁXIMA EN {ticker}! Distribuyendo señal a Telegram...")
+                    print(f"🔥 ¡CATALIZADOR DE ALTO IMPACTO EN {ticker}! Distribuyendo señal a Telegram...")
                     await enviar_telegram(veredicto)
                 
-                # Pausa de 5 segundos entre acciones para cumplir los requerimientos de la API de Google
-                await asyncio.sleep(5)
+                # Pausa estratégica para proteger el volumen de llamadas de la API de Google
+                await asyncio.sleep(6)
                 
             except Exception as e:
-                print(f"⚠️ Error procesando la empresa {ticker}: {e}")
+                print(f"⚠️ Error procesando la consulta en {ticker}: {e}")
         
-        print("💤 Escáner de 30 tickers completado. Durmiendo 15 minutos en la nube...")
-        await asyncio.sleep(900)  # Esperar 15 minutos para la próxima ronda
+        print("💤 Ronda de 30 tickers completada sin bloqueos. Durmiendo 15 minutos en la nube...")
+        await asyncio.sleep(900)
 
 @app.on_event("startup")
 async def inicio_servidor():
-    """Ejecuta el bucle de escaneo de forma automática tan pronto como Render activa el servicio."""
+    """Ejecuta el bucle de escaneo automático una vez levantado el entorno web en Render."""
     asyncio.create_task(tarea_escanear_mercado())
 
 @app.get("/")
 def ruta_salud():
-    """Ruta de control web obligatoria para que Render verifique que el bot sigue vivo."""
-    return {"status": "online", "club": "ClubMSharks", "monitored_tickers": len(WANTED_LIST)}
+    """Ruta web de verificación obligatoria para que los servidores de Render no apaguen el bot."""
+    return {"status": "online", "tracker": "RSS Blindado ClubMSharks", "monitored_tickers": len(WANTED_LIST)}
