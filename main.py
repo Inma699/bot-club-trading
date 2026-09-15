@@ -1,7 +1,9 @@
 import os
 import asyncio
+import time
 import requests
 import re
+import pandas as pd
 from dotenv import load_dotenv
 import yfinance as yf
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -54,6 +56,10 @@ def calcular_metrica_ticker(ticker):
     try:
         datos = yf.download(ticker, period="3mo", interval="1d", auto_adjust=False, progress=False, threads=False)
         if datos.empty or len(datos) < 20:
+            ahora = int(time.time())
+            datos = obtener_datos_yahoo_directos(ticker, ahora)
+        if datos.empty or len(datos) < 20:
+            print(f"⚠️ {ticker}: Yahoo no devolvió al menos 20 sesiones.")
             return None
 
         if hasattr(datos.columns, "levels"):
@@ -83,13 +89,56 @@ def calcular_metrica_ticker(ticker):
             "puntuacion": puntuacion,
         }
     except Exception as error:
-        print(f"⚠️ No se pudieron obtener datos de {ticker}: {error}")
+        print(f"⚠️ Fallo yfinance en {ticker}: {error}. Probando Yahoo directo.")
+        try:
+            datos = obtener_datos_yahoo_directos(ticker)
+            if not datos.empty and len(datos) >= 20:
+                return calcular_metrica_con_datos(ticker, datos)
+        except Exception as fallback_error:
+            print(f"⚠️ Fallo Yahoo directo en {ticker}: {fallback_error}")
         return None
+
+def obtener_datos_yahoo_directos(ticker, ahora=None):
+    """Segundo proveedor usando el endpoint chart de Yahoo, sin el scraper de yfinance."""
+    ahora = ahora or int(time.time())
+    respuesta = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
+        params={"period1": ahora - 90 * 86400, "period2": ahora, "interval": "1d", "events": "history"},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+    )
+    respuesta.raise_for_status()
+    resultado = respuesta.json()["chart"]["result"][0]
+    cotizaciones = resultado["indicators"]["quote"][0]
+    fechas = pd.to_datetime(resultado["timestamp"], unit="s")
+    return pd.DataFrame(cotizaciones, index=fechas).dropna(subset=["close", "high", "low", "volume"])
+
+def calcular_metrica_con_datos(ticker, datos):
+    datos = datos.rename(columns={"close": "Close", "high": "High", "low": "Low", "volume": "Volume"})
+    cierre = datos["Close"].dropna()
+    maximo = datos["High"].dropna()
+    minimo = datos["Low"].dropna()
+    volumen = datos["Volume"].dropna()
+    precio = float(cierre.iloc[-1])
+    atr = float((maximo - minimo).abs().rolling(14).mean().iloc[-1])
+    if not precio or not atr or atr <= 0:
+        return None
+    volumen_medio = float(volumen.iloc[-21:-1].mean())
+    volumen_relativo = float(volumen.iloc[-1] / volumen_medio) if volumen_medio else 0
+    momentum_20d = float((precio / float(cierre.iloc[-21]) - 1) * 100)
+    volatilidad = float(atr / precio * 100)
+    return {
+        "ticker": ticker, "precio": precio, "atr": atr,
+        "volumen_relativo": volumen_relativo, "momentum_20d": momentum_20d,
+        "volatilidad": volatilidad,
+        "puntuacion": momentum_20d + min(volumen_relativo, 5) * 2 + min(volatilidad, 20),
+    }
 
 def seleccionar_mejor_small_cap():
     """Selecciona la mejor candidata disponible en el universo configurado."""
     metricas = [calcular_metrica_ticker(ticker) for ticker in WANTED_LIST]
     disponibles = [metrica for metrica in metricas if metrica]
+    print(f"📊 Datos válidos: {len(disponibles)}/{len(WANTED_LIST)} tickers.")
     return max(disponibles, key=lambda metrica: metrica["puntuacion"]) if disponibles else None
 
 async def generar_analisis_bajo_demanda():
