@@ -129,8 +129,7 @@ async def inicio_servidor():
     """Lanza la tarea en segundo plano al arrancar la app web."""
     asyncio.create_task(tarea_escanear_mercado())
 
-@app.route("/", methods=["GET", "HEAD"])
+@app.api_route("/", methods=["GET", "HEAD"])
 def ruta_salud():
-    """Ruta web de verificación obligatoria adaptada para evitar alertas en Render."""
+    """Control de vida del Web Service de Render."""
     return {"status": "online", "tracker": "Regex Plain-Text Blindado", "monitored_tickers": len(WANTED_LIST)}
-
