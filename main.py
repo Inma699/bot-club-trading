@@ -1,6 +1,7 @@
 import os
 import asyncio
 import time
+from io import StringIO
 import requests
 import re
 import pandas as pd
@@ -107,14 +108,35 @@ def obtener_datos_yahoo_directos(ticker, ahora=None):
         headers={"User-Agent": "Mozilla/5.0"},
         timeout=15,
     )
+    try:
+        respuesta.raise_for_status()
+        resultado = respuesta.json()["chart"]["result"][0]
+        cotizaciones = resultado["indicators"]["quote"][0]
+        fechas = pd.to_datetime(resultado["timestamp"], unit="s")
+        return pd.DataFrame(cotizaciones, index=fechas).dropna(subset=["close", "high", "low", "volume"])
+    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
+        return obtener_datos_stooq(ticker)
+
+def obtener_datos_stooq(ticker):
+    """Respaldo CSV para cuando Yahoo bloquea el tráfico del servicio cloud."""
+    respuesta = requests.get(
+        f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d&d=,",
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+    )
     respuesta.raise_for_status()
-    resultado = respuesta.json()["chart"]["result"][0]
-    cotizaciones = resultado["indicators"]["quote"][0]
-    fechas = pd.to_datetime(resultado["timestamp"], unit="s")
-    return pd.DataFrame(cotizaciones, index=fechas).dropna(subset=["close", "high", "low", "volume"])
+    datos = pd.read_csv(StringIO(respuesta.text))
+    if datos.empty or "Date" not in datos.columns:
+        return pd.DataFrame()
+    datos["Date"] = pd.to_datetime(datos["Date"], errors="coerce")
+    datos = datos.dropna(subset=["Date"]).set_index("Date")
+    return datos.rename(columns={"Close": "close", "High": "high", "Low": "low", "Volume": "volume"})
 
 def calcular_metrica_con_datos(ticker, datos):
-    datos = datos.rename(columns={"close": "Close", "high": "High", "low": "Low", "volume": "Volume"})
+    datos = datos.rename(columns={
+        "close": "Close", "high": "High", "low": "Low", "volume": "Volume",
+        "CLOSE": "Close", "HIGH": "High", "LOW": "Low", "VOLUME": "Volume",
+    })
     cierre = datos["Close"].dropna()
     maximo = datos["High"].dropna()
     minimo = datos["Low"].dropna()
@@ -136,7 +158,33 @@ def calcular_metrica_con_datos(ticker, datos):
 
 def seleccionar_mejor_small_cap():
     """Selecciona la mejor candidata disponible en el universo configurado."""
-    metricas = [calcular_metrica_ticker(ticker) for ticker in WANTED_LIST]
+    metricas = []
+    try:
+        datos_agrupados = yf.download(
+            WANTED_LIST,
+            period="3mo",
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+            group_by="ticker",
+        )
+        if not datos_agrupados.empty and isinstance(datos_agrupados.columns, pd.MultiIndex):
+            primer_nivel = set(datos_agrupados.columns.get_level_values(0))
+            nivel_ticker = 0 if any(ticker in primer_nivel for ticker in WANTED_LIST) else 1
+            for ticker in WANTED_LIST:
+                try:
+                    datos_ticker = datos_agrupados.xs(ticker, axis=1, level=nivel_ticker)
+                    metrica = calcular_metrica_con_datos(ticker, datos_ticker)
+                    if metrica:
+                        metricas.append(metrica)
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue
+    except Exception as error:
+        print(f"⚠️ Descarga agrupada no disponible: {error}")
+
+    faltantes = [ticker for ticker in WANTED_LIST if not any(metrica["ticker"] == ticker for metrica in metricas)]
+    metricas.extend(calcular_metrica_ticker(ticker) for ticker in faltantes)
     disponibles = [metrica for metrica in metricas if metrica]
     print(f"📊 Datos válidos: {len(disponibles)}/{len(WANTED_LIST)} tickers.")
     return max(disponibles, key=lambda metrica: metrica["puntuacion"]) if disponibles else None
@@ -215,12 +263,19 @@ async def procesar_webhook_telegram(request: Request):
         await update.callback_query.message.reply_text("⏳ Ya hay un análisis en curso. Espera unos segundos.")
         return {"ok": True}
     analisis_en_curso = True
-    try:
-        await update.callback_query.message.reply_text("⏳ Analizando las candidatas disponibles...")
-        await update.callback_query.message.reply_text(await generar_analisis_bajo_demanda())
-    finally:
-        analisis_en_curso = False
+    asyncio.create_task(enviar_analisis_bajo_demanda(update.callback_query.message))
     return {"ok": True}
+
+async def enviar_analisis_bajo_demanda(mensaje):
+    try:
+        await mensaje.reply_text("⏳ Analizando las candidatas disponibles...")
+        await mensaje.reply_text(await generar_analisis_bajo_demanda())
+    except Exception as error:
+        print(f"❌ Error enviando análisis solicitado: {error}")
+        await mensaje.reply_text("❌ No se pudo completar el análisis. Revisa los logs de Render.")
+    finally:
+        global analisis_en_curso
+        analisis_en_curso = False
 
 def obtener_noticias_texto_plano(ticker):
     """Extrae las noticias usando expresiones regulares sobre el texto plano, evitando errores de XML."""
@@ -259,7 +314,7 @@ async def tarea_escanear_mercado():
         for ticker in WANTED_LIST:
             try:
                 print(f"📡 Buscando prensa para {ticker}...")
-                noticias_empresa = obtener_noticias_texto_plano(ticker)
+                noticias_empresa = await asyncio.to_thread(obtener_noticias_texto_plano, ticker)
                 
                 if noticias_empresa == "Sin noticias publicadas recientemente.":
                     continue
@@ -278,7 +333,8 @@ async def tarea_escanear_mercado():
                     f"los puntos clave del informe y un plan de acción sugerido para ejecutar entradas de momentum en tu terminal DAS Trader Pro. Usa formato Markdown limpio con emojis."
                 )
                 
-                response = client_gemini.models.generate_content(
+                response = await asyncio.to_thread(
+                    client_gemini.models.generate_content,
                     model="gemini-3.6-flash",
                     contents=prompt,
                 )
