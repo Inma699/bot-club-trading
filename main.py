@@ -20,7 +20,6 @@ CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
     {"symbol": "BTCUSDT", "interval": "15m", "nombre": "BTCUSDT (15m)"},
-    {"symbol": "SPCXUSDT", "interval": "15m", "nombre": "SPCXUSDT (Bitget 15m/1h)", "fallback_intervals": ["1h"], "aliases": ["SPCXUSDT"]},
 ]
 
 # === ESTADÍSTICAS DIARIAS ===
@@ -162,213 +161,7 @@ def evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_a
     return {"detectado": False, "direccion": "NEUTRAL", "motivo": "Sin impulso fuerte"}
 
 
-def obtener_datos_bitget(symbol, interval, limit=210):
-    """Intento robusto de obtener velas (klines/candles) desde Bitget para SPCXUSDT.
-    Prioriza rutas modernas de Bitget y evita la API v1 deprecada.
-    """
-    sym_upper = str(symbol).upper()
-
-    if interval.endswith('m'):
-        try:
-            granularity = str(int(interval[:-1]) * 60)
-        except ValueError:
-            granularity = interval
-    elif interval.endswith('h'):
-        try:
-            granularity = str(int(interval[:-1]) * 3600)
-        except ValueError:
-            granularity = interval
-    else:
-        granularity = interval
-
-    endpoints = [
-        ("https://api.bitget.com/api/spot/v3/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-        ("https://api.bitget.com/api/spot/v2/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-        ("https://api.bitget.com/api/spot/v1/market/candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-        ("https://api.bitget.com/api/spot/v3/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-        ("https://api.bitget.com/api/spot/v2/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-        ("https://api.bitget.com/api/spot/v1/market/history-candles", {"symbol": sym_upper, "granularity": granularity, "limit": limit}),
-    ]
-
-    for url, params in endpoints:
-        try:
-            r = requests.get(url, params=params, timeout=10)
-            if r.status_code != 200:
-                print(f"⚠️ Bitget {url} devolvió estado {r.status_code} para {symbol} {interval}: {r.text[:200]}")
-                continue
-            try:
-                data = r.json()
-            except Exception:
-                txt = r.text.strip()
-                if txt.startswith('['):
-                    import json
-                    return json.loads(txt)
-                continue
-
-            if isinstance(data, dict):
-                code = str(data.get("code", "")).strip().lower()
-                if code and code not in {"0", "000", "00000", "ok", "success", "200"}:
-                    msg = data.get("msg") or data.get("message") or data.get("errorMessage") or ""
-                    print(f"⚠️ Bitget error {code} para {symbol} {interval}: {msg}")
-                    if code == "30032":
-                        continue
-                    continue
-                if "data" in data:
-                    inner = data["data"]
-                    if isinstance(inner, list):
-                        return inner
-                    if isinstance(inner, dict):
-                        if "candles" in inner and isinstance(inner["candles"], list):
-                            return inner["candles"]
-                if "candles" in data and isinstance(data["candles"], list):
-                    return data["candles"]
-                if isinstance(data, list):
-                    return data
-            elif isinstance(data, list):
-                return data
-        except Exception as e:
-            print(f"⚠️ Error consultando Bitget {url} con params {params}: {e}")
-    print("⚠️ No se pudo obtener velas desde Bitget para", symbol)
-    return None
-
-
-def obtener_precio_bitget_v2(symbol):
-    """Obtiene el precio actual de SPCXUSDT usando endpoints modernos de Bitget."""
-    symbol_upper = str(symbol).upper()
-    endpoints = [
-        ("https://api.bitget.com/api/spot/v3/market/ticker", {"symbol": symbol_upper}),
-        ("https://api.bitget.com/api/spot/v3/market/tickers", {"symbol": symbol_upper}),
-        ("https://api.bitget.com/api/spot/v2/market/ticker", {"symbol": symbol_upper}),
-        ("https://api.bitget.com/api/spot/v2/market/tickers", {"symbol": symbol_upper}),
-        ("https://api.bitget.com/api/spot/v3/market/candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
-        ("https://api.bitget.com/api/spot/v2/market/candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
-        ("https://api.bitget.com/api/spot/v3/market/history-candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
-        ("https://api.bitget.com/api/spot/v2/market/history-candles", {"symbol": symbol_upper, "granularity": "900", "limit": 1}),
-    ]
-
-    for url, params in endpoints:
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code != 200:
-                continue
-            data = response.json()
-            if isinstance(data, dict):
-                code = str(data.get("code", "")).strip().lower()
-                if code and code not in {"0", "000", "00000", "ok", "success", "200"}:
-                    continue
-
-                inner = data.get("data", data)
-                if isinstance(inner, dict):
-                    for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
-                        if key in inner:
-                            return float(inner[key])
-                    if "ticker" in inner and isinstance(inner["ticker"], dict):
-                        for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
-                            if key in inner["ticker"]:
-                                return float(inner["ticker"][key])
-                if isinstance(inner, list) and len(inner) > 0:
-                    cand = inner[0]
-                    if isinstance(cand, (list, tuple)) and len(cand) >= 5:
-                        return float(cand[4])
-                    if isinstance(cand, dict):
-                        for key in ("last", "lastPrice", "close", "price", "last_price", "closePrice"):
-                            if key in cand:
-                                return float(cand[key])
-            elif isinstance(data, list) and len(data) > 0:
-                cand = data[0]
-                if isinstance(cand, (list, tuple)) and len(cand) >= 5:
-                    return float(cand[4])
-        except Exception as e:
-            print(f"⚠️ Error consultando precio Bitget V2/V3 en {url}: {e}")
-    return None
-
-
-def buscar_id_coingecko_por_simbolo(symbol):
-    try:
-        response = requests.get("https://api.coingecko.com/api/v3/search", params={"query": symbol}, timeout=10)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        if not isinstance(data, dict):
-            return None
-        coins = data.get("coins", [])
-        for coin in coins:
-            if str(coin.get("symbol", "")).lower() == str(symbol).lower():
-                return coin.get("id")
-        if coins:
-            return coins[0].get("id")
-    except Exception as e:
-        print(f"⚠️ Error buscando SPCX en CoinGecko: {e}")
-    return None
-
-
-def obtener_precio_alternativa_spcx():
-    """Fallback general para SPCX usando CoinGecko y, si es necesario, Binance."""
-    candidates = ["spcx"]
-    for coin_id in candidates:
-        try:
-            response = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": coin_id, "vs_currencies": "usdt,usd"},
-                timeout=10,
-            )
-            if response.status_code != 200:
-                continue
-            data = response.json()
-            if not isinstance(data, dict):
-                continue
-            coin_data = data.get(coin_id, {})
-            for currency in ("usdt", "usd"):
-                if coin_data.get(currency) is not None:
-                    return float(coin_data[currency])
-        except Exception as e:
-            print(f"⚠️ Error consultando CoinGecko para SPCX: {e}")
-
-    coin_id = buscar_id_coingecko_por_simbolo("SPCX")
-    if coin_id:
-        try:
-            response = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": coin_id, "vs_currencies": "usdt,usd"},
-                timeout=10,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                coin_data = data.get(coin_id, {})
-                for currency in ("usdt", "usd"):
-                    if coin_data.get(currency) is not None:
-                        return float(coin_data[currency])
-        except Exception as e:
-            print(f"⚠️ Error consultando CoinGecko con id {coin_id}: {e}")
-
-    for url, params in [
-        ("https://api.binance.com/api/v3/ticker/price", {"symbol": "SPCXUSDT"}),
-        ("https://api.binance.us/api/v3/ticker/price", {"symbol": "SPCXUSDT"}),
-    ]:
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, dict) and data.get("price") is not None:
-                    return float(data["price"])
-        except Exception as e:
-            print(f"⚠️ Error consultando fallback Binance para SPCX: {e}")
-
-    return None
-
-
-def obtener_precio_spcx():
-    precio = obtener_precio_bitget_v2('SPCXUSDT')
-    if precio is not None:
-        return precio
-    return obtener_precio_alternativa_spcx()
-
-
 def obtener_datos_binance(symbol, interval, limit=210):
-    # If this is the Bitget SPCX perpetual, route to Bitget data provider
-    if str(symbol).upper() == "SPCXUSDT":
-        return obtener_datos_bitget(symbol, interval, limit=limit)
-
     urls = [
         ("https://api.binance.com/api/v3/klines", {}),
         ("https://api.binance.us/api/v3/klines", {}),
@@ -649,9 +442,6 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
 
 def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
     intervalos = [mercado.get("interval", "15m")]
-    if mercado.get("symbol") == "SPCXUSDT":
-        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"]) 
-
     for interval in intervalos:
         datos = obtener_datos_binance(mercado["symbol"], interval)
         if not datos:
@@ -708,46 +498,11 @@ def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
             "interval": interval,
         }
 
-    if mercado["symbol"] == "SPCXUSDT":
-        precio_directo = obtener_precio_spcx()
-        if precio_directo is not None:
-            stop_loss = max(precio_directo * 0.98, precio_directo - 1.0)
-            distancia_riesgo = max(precio_directo - stop_loss, 1.0)
-            take_profit = precio_directo + (distancia_riesgo * 2)
-            motivo = "Señal manual de respaldo para SPCX usando precio directo de Bitget/alternativa externa."
-            mensaje = construir_mensaje_senal(
-                mercado=mercado,
-                direccion="COMPRA",
-                precio_actual=precio_directo,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                ema_200=precio_directo,
-                fuerza=0.0,
-                motivo=motivo,
-                flujo_btc=None,
-                liquidaciones=None,
-                tipo=tipo,
-            )
-            return {
-                "mercado": mercado,
-                "direccion": "COMPRA",
-                "precio_actual": precio_directo,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "ema_200": precio_directo,
-                "mensaje": mensaje,
-                "apalancamiento": 10,
-                "interval": mercado.get("interval", "15m"),
-            }
-
     return None
 
 
 def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
     intervalos = [mercado.get("interval", "15m")]
-    if mercado.get("symbol") == "SPCXUSDT":
-        intervalos = [mercado.get("interval", "15m")] + mercado.get("fallback_intervals", ["1h"]) 
-
     for interval in intervalos:
         datos = obtener_datos_binance(mercado["symbol"], interval)
         if not datos:
@@ -883,7 +638,6 @@ def enviar_boton_solicitud(chat_id=None):
     estado_auto = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
     markup = {"inline_keyboard": [
         [{"text": "BTC manual", "callback_data": "senal_btc"}],
-        [{"text": "SPCX manual", "callback_data": "senal_spcx"}],
         [{"text": f"Automáticas: {estado_auto}", "callback_data": "toggle_auto"}],
     ]}
     mensaje = (
@@ -893,7 +647,7 @@ def enviar_boton_solicitud(chat_id=None):
         "Los administradores del canal pueden pedir más de 1 señal manual al día.\n"
         "Los miembros normales solo pueden solicitar 1 señal manual por día.\n"
         "La señal manual se asume bajo su propio riesgo y no tiene por qué coincidir con la estrategia principal del bot.\n\n"
-        "Si el botón no responde, escribe /senalbtc o /senalspx en este chat para pedirla manualmente."
+        "Si el botón no responde, escribe /senalbtc en este chat para pedirla manualmente."
     )
     enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=markup)
 
@@ -930,8 +684,6 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
     mercados = CONFIGURACIONES_MERCADO
     if mercado_seleccionado == "btc":
         mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "BTCUSDT"]
-    elif mercado_seleccionado in {"spx", "spcx"}:
-        mercados = [m for m in CONFIGURACIONES_MERCADO if m["symbol"] == "SPCXUSDT"]
 
     for mercado in mercados:
         senal = generar_senal_para_mercado(mercado, hora_actual, tipo="manual")
@@ -947,7 +699,7 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
             return True
 
     # Si se solicitó un mercado específico, no probamos otros mercados distintos.
-    if mercado_seleccionado in {"btc", "spx", "spcx"}:
+    if mercado_seleccionado == "btc":
         mensaje_error = (
             "⚠️ *CLUB MARKETSHARKS*\n\n"
             "No se pudo generar una señal para el mercado solicitado en este momento. Inténtalo de nuevo más tarde."
@@ -997,8 +749,6 @@ def telegram_listener():
                         generar_senal_manual(chat_id=chat_id, requester_id=user_id)
                     if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
-                    if text in {"/senalspx", "/senalspcx", "senalspx", "senalspcx", "spxmanual", "spcxmanual"}:
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spcx", requester_id=user_id)
                 if "callback_query" in update:
                     callback = update["callback_query"]
                     chat_id = callback.get("message", {}).get("chat", {}).get("id")
@@ -1008,10 +758,6 @@ def telegram_listener():
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
-                    if data == "senal_spcx":
-                        answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
-                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal SPCX..."}, timeout=10)
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="spcx", requester_id=user_id)
                     if data == "toggle_auto":
                         # Solo admins pueden togglear
                         if not es_admin_del_canal(user_id):
