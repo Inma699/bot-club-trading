@@ -177,7 +177,53 @@ def obtener_datos_binance(symbol, interval, limit=210):
                 print(f"⚠️ {url} devolvió estado {response.status_code} para {candidate_symbol} {interval}: {response.text[:200]}")
             except Exception as e:
                 print(f"⚠️ Error consultando {url} para {candidate_symbol} {interval}: {e}")
+
+    datos_kraken = obtener_datos_kraken(symbol, interval, limit)
+    if datos_kraken:
+        print(f"✅ Velas obtenidas de Kraken para {symbol} {interval}: {len(datos_kraken)}")
+        return datos_kraken
     return None
+
+
+def obtener_datos_kraken(symbol, interval, limit=210):
+    """Fuente alternativa pública de velas BTC/USD cuando Binance no está disponible."""
+    intervalos = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+    intervalo = intervalos.get(interval)
+    if str(symbol).upper() != "BTCUSDT" or intervalo is None:
+        return None
+
+    try:
+        response = requests.get(
+            "https://api.kraken.com/0/public/OHLC",
+            params={"pair": "XBTUSD", "interval": intervalo},
+            timeout=12,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("error"):
+            raise ValueError(", ".join(payload["error"]))
+
+        resultados = payload.get("result", {})
+        par = next((clave for clave in resultados if clave != "last"), None)
+        if not par:
+            return None
+
+        velas = resultados[par]
+        velas_cerradas = velas[:-1]
+        return [
+            [
+                int(float(vela[0]) * 1000),
+                vela[1],
+                vela[2],
+                vela[3],
+                vela[4],
+                vela[6],
+            ]
+            for vela in velas_cerradas[-limit:]
+        ]
+    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError) as error:
+        print(f"⚠️ Kraken no pudo devolver velas para {symbol} {interval}: {error}")
+        return None
 
 
 def obtener_datos_binance_futuros(symbol, interval, limit=210):
