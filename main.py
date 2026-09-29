@@ -641,7 +641,7 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
         f"💵 *Precio Entrada:* $ {precio_actual:,.2f} USD\n"
         f"🛡️ *Stop Loss (SL):* $ {stop_loss:,.2f} USD\n"
         f"💰 *Take Profit (TP):* $ {take_profit:,.2f} USD\n"
-        f"⚙️ *Apalancamiento recomendado:* {20 if mercado['symbol'] == 'BTCUSDT' else 10}x\n\n"
+        f"⚙️ *Apalancamiento recomendado:* 75x\n\n"
         f"📈 *EMA 200:* $ {ema_200:,.2f} USD\n"
         f"⚡ *Fuerza movimiento:* {fuerza:.2f}% | *Contexto:* {motivo}{flujo_texto}{liquidacion_texto}"
     )
