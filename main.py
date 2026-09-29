@@ -416,9 +416,60 @@ def enviar_resumen_diario():
     ESTADISTICAS["ultimo_resumen"] = hoy
 
 
-def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_profit, ema_200, fuerza, motivo, flujo_btc=None, liquidaciones=None, tipo="normal"):
+def calcular_niveles_senal(direccion, precio, cierres, altos, bajos):
+    if len(cierres) < 22:
+        return None
+
+    rangos = []
+    for indice in range(max(1, len(cierres) - 14), len(cierres)):
+        rangos.append(max(
+            altos[indice] - bajos[indice],
+            abs(altos[indice] - cierres[indice - 1]),
+            abs(bajos[indice] - cierres[indice - 1]),
+        ))
+    atr = sum(rangos) / len(rangos) if rangos else 0
+    if atr <= 0:
+        return None
+
+    soporte = min(bajos[-21:-1])
+    resistencia = max(altos[-21:-1])
+    margen_nivel = max(atr * 0.15, precio * 0.0005)
+    riesgo_minimo = max(atr * 1.5, precio * 0.0025)
+    riesgo_maximo = precio * 0.015
+
+    if direccion == "COMPRA":
+        distancia_soporte = precio - soporte + margen_nivel if soporte < precio else 0
+        distancia_riesgo = max(riesgo_minimo, distancia_soporte)
+        if distancia_riesgo > riesgo_maximo:
+            return None
+        stop_loss = precio - distancia_riesgo
+        take_profit = precio + (distancia_riesgo * 2.05)
+        if precio < resistencia < take_profit:
+            return None
+    else:
+        distancia_resistencia = resistencia - precio + margen_nivel if resistencia > precio else 0
+        distancia_riesgo = max(riesgo_minimo, distancia_resistencia)
+        if distancia_riesgo > riesgo_maximo:
+            return None
+        stop_loss = precio + distancia_riesgo
+        take_profit = precio - (distancia_riesgo * 2.05)
+        if take_profit < soporte < precio:
+            return None
+
+    return {
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "soporte": soporte,
+        "resistencia": resistencia,
+        "ratio_riesgo_beneficio": abs(take_profit - precio) / abs(precio - stop_loss),
+    }
+
+
+def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_profit, ema_200, fuerza, motivo, flujo_btc=None, liquidaciones=None, tipo="normal", soporte=None, resistencia=None, ratio_riesgo_beneficio=2.0):
     flujo_texto = f"\n⚡ *Flujo de capital:* {flujo_btc['direccion']} ({flujo_btc['confianza']:.2f}) | {flujo_btc['motivo']}" if flujo_btc else ""
     liquidacion_texto = f"\n💥 *Liquidaciones/impulso masivo:* {liquidaciones['intensidad']} | {liquidaciones['motivo']}" if liquidaciones and liquidaciones.get("detectado") else ""
+    soporte_texto = f"🧱 *Soporte 20 velas:* $ {soporte:,.2f} USD\n" if soporte is not None else "🧱 *Soporte 20 velas:* no identificado\n"
+    resistencia_texto = f"🧱 *Resistencia 20 velas:* $ {resistencia:,.2f} USD\n" if resistencia is not None else "🧱 *Resistencia 20 velas:* no identificada\n"
     prefijo = "🦈 *SEÑAL MANUAL*" if tipo == "manual" else "🦈 *CLUB MARKETSHARKS ALERTA EN VIVO*"
     tipo_texto = "\n⚠️ *Esta señal fue solicitada manualmente por un miembro y no forma parte de la detección automática principal.*" if tipo == "manual" else ""
     if direccion == "COMPRA":
@@ -434,6 +485,9 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
         f"💵 *Precio Entrada:* $ {precio_actual:,.2f} USD\n"
         f"🛡️ *Stop Loss (SL):* $ {stop_loss:,.2f} USD\n"
         f"💰 *Take Profit (TP):* $ {take_profit:,.2f} USD\n"
+        f"📐 *Riesgo/beneficio:* 1:{ratio_riesgo_beneficio:.2f}\n"
+        f"{soporte_texto}"
+        f"{resistencia_texto}"
         f"⚙️ *Apalancamiento recomendado:* 75x\n\n"
         f"📈 *EMA 200:* $ {ema_200:,.2f} USD\n"
         f"⚡ *Fuerza movimiento:* {fuerza:.2f}% | *Contexto:* {motivo}{flujo_texto}{liquidacion_texto}"
@@ -463,14 +517,14 @@ def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
 
         if precio_actual > ema_200 and (cambio_1 >= -0.1 or cambio_3 >= -0.2):
             direccion = "COMPRA"
-            stop_loss = min(bajos[-3:]) if len(bajos) >= 3 else precio_actual - 1.0
-            distancia_riesgo = max(precio_actual - stop_loss, 1.0)
-            take_profit = precio_actual + (distancia_riesgo * 2)
         else:
             direccion = "VENTA"
-            stop_loss = max(altos[-3:]) if len(altos) >= 3 else precio_actual + 1.0
-            distancia_riesgo = max(stop_loss - precio_actual, 1.0)
-            take_profit = precio_actual - (distancia_riesgo * 2)
+
+        niveles = calcular_niveles_senal(direccion, precio_actual, cierres, altos, bajos)
+        if not niveles:
+            continue
+        stop_loss = niveles["stop_loss"]
+        take_profit = niveles["take_profit"]
 
         motivo = f"Señal manual de respaldo | cambio_1 {cambio_1:.2f}% | EMA 200 {ema_200:.2f}"
         mensaje = construir_mensaje_senal(
@@ -485,6 +539,9 @@ def generar_senal_fallback(mercado, hora_actual, tipo="manual"):
             flujo_btc=None,
             liquidaciones=None,
             tipo=tipo,
+            soporte=niveles["soporte"],
+            resistencia=niveles["resistencia"],
+            ratio_riesgo_beneficio=niveles["ratio_riesgo_beneficio"],
         )
         return {
             "mercado": mercado,
@@ -563,16 +620,16 @@ def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
 
         if condicion_compra:
             direccion = "COMPRA"
-            stop_loss = low_ob if low_ob < precio_actual else precio_actual - 200.0
-            distancia_riesgo = precio_actual - stop_loss
-            take_profit = precio_actual + (distancia_riesgo * 2)
         elif condicion_venta:
             direccion = "VENTA"
-            stop_loss = high_ob if high_ob > precio_actual else precio_actual + 200.0
-            distancia_riesgo = stop_loss - precio_actual
-            take_profit = precio_actual - (distancia_riesgo * 2)
         else:
             continue
+
+        niveles = calcular_niveles_senal(direccion, precio_actual, cierres, altos, bajos)
+        if not niveles:
+            continue
+        stop_loss = niveles["stop_loss"]
+        take_profit = niveles["take_profit"]
 
         mensaje = construir_mensaje_senal(
             mercado=mercado,
@@ -586,6 +643,9 @@ def generar_senal_para_mercado(mercado, hora_actual, tipo="auto"):
             flujo_btc=flujo_btc,
             liquidaciones=liquidaciones,
             tipo=tipo,
+            soporte=niveles["soporte"],
+            resistencia=niveles["resistencia"],
+            ratio_riesgo_beneficio=niveles["ratio_riesgo_beneficio"],
         )
         return {
             "mercado": mercado,
