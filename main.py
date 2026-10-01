@@ -2,6 +2,9 @@ import os
 import threading
 import time
 import requests
+import ccxt
+import numpy as np
+import pandas as pd
 import psycopg2
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -80,6 +83,8 @@ AUTO_SIGNAL_ENABLED = True
 AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
 ULTIMA_SENAL_AUTOMATICA = None
 DETENER_BOT = threading.Event()
+BINARIAS_ENABLED = os.getenv("BINARIAS_ENABLED", "true").strip().lower() in {"1", "true", "on", "si", "sí"}
+SIMBOLO_BINARIAS = os.getenv("BINARIAS_SYMBOL", "BTC/USDT:USDT")
 
 
 @app.route('/stop')
@@ -751,12 +756,17 @@ def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
     registrar_senal_emitida(senal["mercado"], senal["direccion"], senal["precio_actual"], senal["stop_loss"], senal["take_profit"], senal["apalancamiento"], tipo=tipo)
 
 
-def enviar_boton_solicitud(chat_id=None):
+def construir_teclado_solicitud():
     estado_auto = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
-    markup = {"inline_keyboard": [
+    estado_binarias = "ON" if BINARIAS_ENABLED else "OFF"
+    return {"inline_keyboard": [
         [{"text": "BTC manual", "callback_data": "senal_btc"}],
         [{"text": f"Automáticas: {estado_auto}", "callback_data": "toggle_auto"}],
+        [{"text": f"Señales binarias: {estado_binarias}", "callback_data": "toggle_binarias"}],
     ]}
+
+
+def enviar_boton_solicitud(chat_id=None):
     mensaje = (
         "🦈 *CLUB MARKETSHARKS*\n\n"
         "Elija el mercado para solicitar una señal manual instantánea.\n\n"
@@ -764,9 +774,27 @@ def enviar_boton_solicitud(chat_id=None):
         "Los administradores del canal pueden pedir más de 1 señal manual al día.\n"
         "Los miembros normales solo pueden solicitar 1 señal manual por día.\n"
         "La señal manual se asume bajo su propio riesgo y no tiene por qué coincidir con la estrategia principal del bot.\n\n"
-        "Si el botón no responde, escribe /senalbtc en este chat para pedirla manualmente."
+        "Si el botón no responde, escribe /senalbtc en este chat para pedirla manualmente.\n"
+        "Los administradores pueden activar o pausar las señales automáticas y binarias desde los botones."
     )
-    enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=markup)
+    enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=construir_teclado_solicitud())
+
+
+def actualizar_teclado_callback(callback):
+    mensaje = callback.get("message", {})
+    chat_id = mensaje.get("chat", {}).get("id")
+    message_id = mensaje.get("message_id")
+    if not chat_id or not message_id:
+        return
+    requests.post(
+        f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/editMessageReplyMarkup",
+        json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": construir_teclado_solicitud(),
+        },
+        timeout=10,
+    )
 
 
 def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=None):
@@ -840,7 +868,206 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
     return False
 
 
+def calcular_cci_binarias(velas, periodo=14):
+    precio_tipico = (velas["high"] + velas["low"] + velas["close"]) / 3
+    media = precio_tipico.rolling(window=periodo).mean()
+    desviacion = precio_tipico.rolling(window=periodo).apply(
+        lambda valores: np.abs(valores - valores.mean()).mean(), raw=True
+    ).replace(0, 0.0001)
+    return float(((precio_tipico - media) / (0.015 * desviacion)).iloc[-1])
+
+
+def actualizar_contexto_binarias(exchange_binarias):
+    columnas = ["timestamp", "open", "high", "low", "close", "volume"]
+    barras_1m = exchange_binarias.fetch_ohlcv(SIMBOLO_BINARIAS, timeframe="1m", limit=100)
+    barras_5m = exchange_binarias.fetch_ohlcv(SIMBOLO_BINARIAS, timeframe="5m", limit=30)
+    if len(barras_1m) < 50 or len(barras_5m) < 25:
+        raise ValueError("Bitget devolvió pocas velas para calcular el contexto")
+
+    velas_1m = pd.DataFrame(barras_1m, columns=columnas)
+    bloque = velas_1m["close"].iloc[-50:].values
+    x = np.arange(50)
+    coeficientes = np.polyfit(x, bloque, 1)
+    centro = float(coeficientes[0] * 49 + coeficientes[1])
+    desviacion = float(velas_1m["close"].iloc[-50:].std())
+    rango_real_1m = pd.concat([
+        velas_1m["high"] - velas_1m["low"],
+        (velas_1m["high"] - velas_1m["close"].shift()).abs(),
+        (velas_1m["low"] - velas_1m["close"].shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr_macro = float(rango_real_1m.rolling(14).mean().iloc[-1])
+
+    velas_5m = pd.DataFrame(barras_5m, columns=columnas)
+    ema9 = velas_5m["close"].ewm(span=9, adjust=False).mean().iloc[-1]
+    ema21 = velas_5m["close"].ewm(span=21, adjust=False).mean().iloc[-1]
+    tendencia = "ALCISTA" if ema9 > ema21 else "BAJISTA" if ema9 < ema21 else "NEUTRO"
+
+    cerradas = velas_5m.iloc[:-1]
+    movimiento_alcista = cerradas["high"].diff()
+    movimiento_bajista = -cerradas["low"].diff()
+    dm_positivo = movimiento_alcista.where(
+        (movimiento_alcista > movimiento_bajista) & (movimiento_alcista > 0), 0.0
+    )
+    dm_negativo = movimiento_bajista.where(
+        (movimiento_bajista > movimiento_alcista) & (movimiento_bajista > 0), 0.0
+    )
+    cierre_previo = cerradas["close"].shift()
+    rango_real = pd.concat([
+        cerradas["high"] - cerradas["low"],
+        (cerradas["high"] - cierre_previo).abs(),
+        (cerradas["low"] - cierre_previo).abs(),
+    ], axis=1).max(axis=1)
+    atr_5m = rango_real.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+    di_positivo = 100 * dm_positivo.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean() / atr_5m
+    di_negativo = 100 * dm_negativo.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean() / atr_5m
+    denominador = (di_positivo + di_negativo).replace(0, np.nan)
+    dx = (100 * (di_positivo - di_negativo).abs() / denominador).fillna(0)
+    adx = float(dx.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean().iloc[-1])
+    volumen_referencia = cerradas["volume"].iloc[-21:-1].mean()
+    ratio_volumen = float(cerradas["volume"].iloc[-1] / volumen_referencia) if volumen_referencia > 0 else 0.0
+
+    return {
+        "techo": centro + desviacion * 2.0,
+        "piso": centro - desviacion * 2.0,
+        "centro": centro,
+        "atr": atr_macro,
+        "tendencia": tendencia,
+        "adx": adx if np.isfinite(adx) else 0.0,
+        "ratio_volumen": ratio_volumen,
+    }
+
+
+def enviar_alerta_binaria(mensaje):
+    if BINARIAS_ENABLED:
+        threading.Thread(target=enviar_senal_telegram, args=(mensaje,), daemon=True).start()
+
+
+def motor_senales_binarias():
+    print(f"📡 Motor de señales binarias iniciado para {SIMBOLO_BINARIAS}.")
+    exchange_binarias = ccxt.bitget({"enableRateLimit": True})
+    contexto = None
+    ultimo_intento_contexto = 0.0
+    ultima_actualizacion_contexto = 0.0
+    historial_velas = []
+    precios_ventana = []
+    inicio_ventana = time.time()
+    ultima_direccion = None
+    ultima_ruptura = None
+
+    while not DETENER_BOT.is_set():
+        if not BINARIAS_ENABLED:
+            historial_velas.clear()
+            precios_ventana.clear()
+            inicio_ventana = time.time()
+            ultima_direccion = None
+            ultima_ruptura = None
+            time.sleep(1)
+            continue
+
+        try:
+            ahora = time.time()
+            if ahora - ultimo_intento_contexto >= 20:
+                ultimo_intento_contexto = ahora
+                try:
+                    contexto = actualizar_contexto_binarias(exchange_binarias)
+                    ultima_actualizacion_contexto = time.time()
+                except Exception as error:
+                    print(f"⚠️ No se pudo actualizar el contexto binario ({type(error).__name__}).")
+
+            if not contexto or ahora - ultima_actualizacion_contexto > 40:
+                time.sleep(2)
+                continue
+
+            ticker = exchange_binarias.fetch_ticker(SIMBOLO_BINARIAS)
+            precio = float(ticker["last"])
+            precios_ventana.append(precio)
+            tiempo_ventana = time.time() - inicio_ventana
+            if tiempo_ventana < 10:
+                time.sleep(2)
+                continue
+
+            cierre = precios_ventana[-1]
+            vela = {"high": max(precios_ventana), "low": min(precios_ventana), "close": cierre}
+            historial_velas.append(vela)
+            if len(historial_velas) > 50:
+                historial_velas.pop(0)
+            precios_ventana = []
+            inicio_ventana = time.time()
+
+            if len(historial_velas) < 15:
+                continue
+
+            velas_10s = pd.DataFrame(historial_velas)
+            ema5 = velas_10s["close"].ewm(span=5, adjust=False).mean()
+            ema13 = velas_10s["close"].ewm(span=13, adjust=False).mean()
+            cci = calcular_cci_binarias(velas_10s)
+            hora = hora_espana().strftime("%H:%M:%S")
+            techo = contexto["techo"]
+            piso = contexto["piso"]
+            centro = contexto["centro"]
+            adx = contexto["adx"]
+            ratio_volumen = contexto["ratio_volumen"]
+            atr = contexto["atr"]
+
+            if atr > 50:
+                expiracion = "1 MINUTO"
+            elif atr > 35:
+                expiracion = "2 MINUTOS"
+            else:
+                expiracion = "5 MINUTOS"
+
+            ruptura_alcista = cierre > techo and contexto["tendencia"] == "ALCISTA" and adx >= 25 and ratio_volumen >= 1.3 and cci > 0
+            ruptura_bajista = cierre < piso and contexto["tendencia"] == "BAJISTA" and adx >= 25 and ratio_volumen >= 1.3 and cci < 0
+            duracion = "30-60 min" if adx >= 45 else "20-40 min" if adx >= 35 else "10-30 min"
+
+            if not (piso <= cierre <= techo):
+                if ruptura_alcista and ultima_ruptura != "LONG":
+                    ultima_ruptura = "LONG"
+                    enviar_alerta_binaria(
+                        f"🚀 RUPTURA ALCISTA FUERTE | LONG\nSímbolo: {SIMBOLO_BINARIAS}\n"
+                        f"Precio: {cierre:,.1f}\nHora: {hora}\nExpiración: {expiracion}\n"
+                        f"ADX 5m: {adx:.1f} | Volumen: {ratio_volumen:.1f}x\n"
+                        f"Duración orientativa: {duracion} (no garantizada)"
+                    )
+                elif ruptura_bajista and ultima_ruptura != "SHORT":
+                    ultima_ruptura = "SHORT"
+                    enviar_alerta_binaria(
+                        f"🔻 RUPTURA BAJISTA FUERTE | SHORT\nSímbolo: {SIMBOLO_BINARIAS}\n"
+                        f"Precio: {cierre:,.1f}\nHora: {hora}\nExpiración: {expiracion}\n"
+                        f"ADX 5m: {adx:.1f} | Volumen: {ratio_volumen:.1f}x\n"
+                        f"Duración orientativa: {duracion} (no garantizada)"
+                    )
+            else:
+                ultima_ruptura = None
+
+            ema5_actual, ema13_actual = ema5.iloc[-1], ema13.iloc[-1]
+            ema5_previa, ema13_previa = ema5.iloc[-2], ema13.iloc[-2]
+            if ema5_actual > ema13_actual and ema5_previa <= ema13_previa and ultima_direccion != "COMPRA":
+                ultima_direccion = "COMPRA"
+                if cierre <= centro and atr >= 35 and contexto["tendencia"] == "ALCISTA" and cci > 0:
+                    situacion = "RUPTURA ALCISTA" if cierre > techo else "REBOTE EN PISO"
+                    enviar_alerta_binaria(
+                        f"🚀 LONG CONFIRMADO\nSímbolo: {SIMBOLO_BINARIAS}\nPrecio: {cierre:,.1f}\n"
+                        f"Hora: {hora}\nContexto: {situacion}\nExpiración: {expiracion}"
+                    )
+            elif ema5_actual < ema13_actual and ema5_previa >= ema13_previa and ultima_direccion != "VENTA":
+                ultima_direccion = "VENTA"
+                if cierre >= centro and atr >= 35 and contexto["tendencia"] == "BAJISTA" and cci < 0:
+                    situacion = "RUPTURA BAJISTA" if cierre < piso else "REBOTE EN TECHO"
+                    enviar_alerta_binaria(
+                        f"🔻 SHORT CONFIRMADO\nSímbolo: {SIMBOLO_BINARIAS}\nPrecio: {cierre:,.1f}\n"
+                        f"Hora: {hora}\nContexto: {situacion}\nExpiración: {expiracion}"
+                    )
+            elif abs(ema5_actual - ema13_actual) > 2.0:
+                ultima_direccion = None
+
+        except Exception as error:
+            print(f"⚠️ Error en motor de señales binarias ({type(error).__name__}).")
+            time.sleep(2)
+
+
 def telegram_listener():
+    global AUTO_SIGNAL_ENABLED, BINARIAS_ENABLED
     if not TOKEN_TELEGRAM:
         return
     offset = None
@@ -875,18 +1102,26 @@ def telegram_listener():
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
-                    if data == "toggle_auto":
-                        # Solo admins pueden togglear
+                    elif data in {"toggle_auto", "toggle_binarias"}:
                         if not es_admin_del_canal(user_id):
                             answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
-                            requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Solo administradores pueden cambiar el estado de automáticas."}, timeout=10)
+                            requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Solo administradores pueden cambiar estos estados."}, timeout=10)
                         else:
-                            # Alternar
-                            global AUTO_SIGNAL_ENABLED
-                            AUTO_SIGNAL_ENABLED = not AUTO_SIGNAL_ENABLED
-                            nuevo_estado = "activadas" if AUTO_SIGNAL_ENABLED else "desactivadas"
-                            requests.post(f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery", json={"callback_query_id": callback.get("id"), "text": f"Automáticas {nuevo_estado}."}, timeout=10)
-                            enviar_senal_telegram(f"⚙️ Señales automáticas ahora *{nuevo_estado}* por petición del admin {user_id}.", chat_id=CHAT_ID_CANAL)
+                            if data == "toggle_auto":
+                                AUTO_SIGNAL_ENABLED = not AUTO_SIGNAL_ENABLED
+                                estado = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
+                                detalle = f"Señales automáticas ahora {estado}."
+                            else:
+                                BINARIAS_ENABLED = not BINARIAS_ENABLED
+                                estado = "ON" if BINARIAS_ENABLED else "OFF"
+                                detalle = f"Señales binarias ahora {estado}."
+                            requests.post(
+                                f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery",
+                                json={"callback_query_id": callback.get("id"), "text": detalle},
+                                timeout=10,
+                            )
+                            actualizar_teclado_callback(callback)
+                            enviar_senal_telegram(f"⚙️ {detalle} (admin {user_id}).", chat_id=CHAT_ID_CANAL)
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
@@ -894,6 +1129,7 @@ def telegram_listener():
 
 def motor_de_trading():
     print("🚀 Iniciando motor analítico duplicador de TradingView...")
+    print(f"📊 Señales binarias: {'ON' if BINARIAS_ENABLED else 'OFF'}.")
     time.sleep(5)
 
     alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Algoritmo de sincronización activado. Escaneando el mercado en vivo clonando la estrategia de TradingView para compra y venta..."
@@ -979,6 +1215,10 @@ if __name__ == '__main__':
     hilo_trading = threading.Thread(target=motor_de_trading)
     hilo_trading.daemon = True
     hilo_trading.start()
+
+    hilo_binarias = threading.Thread(target=motor_senales_binarias)
+    hilo_binarias.daemon = True
+    hilo_binarias.start()
 
     hilo_listener = threading.Thread(target=telegram_listener)
     hilo_listener.daemon = True
