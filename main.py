@@ -356,56 +356,65 @@ def actualizar_operaciones_abiertas(cierres, datos, mercado):
     if not OPERACIONES_ABIERTAS:
         return
 
-    precio_actual = cierres[-1]
+    velas_recientes = datos[-5:]
     nuevas_operaciones = []
 
     for op in OPERACIONES_ABIERTAS:
+        if op["mercado"] != mercado["nombre"]:
+            nuevas_operaciones.append((op, None))
+            continue
+
+        estado = None
+        nivel_alcanzado = None
+        precio_nivel = None
+        minuto_senal = op.get("creado_en", 0) // 60000
+        for vela in velas_recientes:
+            if int(vela[0]) // 60000 < minuto_senal:
+                continue
+            maximo = float(vela[2])
+            minimo = float(vela[3])
+            if op["tipo"] == "COMPRA":
+                toca_sl = minimo <= op["stop_loss"]
+                toca_tp = maximo >= op["take_profit"]
+            else:
+                toca_sl = maximo >= op["stop_loss"]
+                toca_tp = minimo <= op["take_profit"]
+
+            if toca_sl or toca_tp:
+                # Si ambos niveles aparecen en la misma vela, se cuenta el SL primero.
+                estado = "perdida" if toca_sl else "ganada"
+                nivel_alcanzado = "Stop Loss (SL)" if toca_sl else "Take Profit (TP)"
+                precio_nivel = op["stop_loss"] if toca_sl else op["take_profit"]
+                break
+
+        if estado:
+            ESTADISTICAS["perdidas" if estado == "perdida" else "ganadas"] += 1
+            nuevas_operaciones.append((op, estado, nivel_alcanzado, precio_nivel))
+            continue
+
+        precio_actual = cierres[-1]
         if op["tipo"] == "COMPRA":
             ganancia_pct = ((precio_actual - op["entrada"]) / op["entrada"]) * 100
-            if precio_actual <= op["stop_loss"]:
-                ESTADISTICAS["perdidas"] += 1
-                nuevas_operaciones.append((op, "perdida"))
-            elif precio_actual >= op["take_profit"]:
-                ESTADISTICAS["ganadas"] += 1
-                nuevas_operaciones.append((op, "ganada"))
-            else:
-                if ganancia_pct >= 10 and not op.get("aviso_10pct", False):
-                    op["aviso_10pct"] = True
-                    mensaje_profit = (
-                        f"📈 *AVISO DE CIERRE*\n\n"
-                        f"📊 Par: {op['mercado']}\n"
-                        f"🔹 Tipo: {op['tipo']}\n"
-                        f"💹 Beneficio actual: {ganancia_pct:.2f}%\n"
-                        f"💡 Se recomienda cerrar la operación si deseas tomar ganancias."
-                    )
-                    enviar_senal_telegram(mensaje_profit)
-                nuevas_operaciones.append((op, None))
         else:
             ganancia_pct = ((op["entrada"] - precio_actual) / op["entrada"]) * 100
-            if precio_actual >= op["stop_loss"]:
-                ESTADISTICAS["perdidas"] += 1
-                nuevas_operaciones.append((op, "perdida"))
-            elif precio_actual <= op["take_profit"]:
-                ESTADISTICAS["ganadas"] += 1
-                nuevas_operaciones.append((op, "ganada"))
-            else:
-                if ganancia_pct >= 10 and not op.get("aviso_10pct", False):
-                    op["aviso_10pct"] = True
-                    mensaje_profit = (
-                        f"📈 *AVISO DE CIERRE*\n\n"
-                        f"📊 Par: {op['mercado']}\n"
-                        f"🔹 Tipo: {op['tipo']}\n"
-                        f"💹 Beneficio actual: {ganancia_pct:.2f}%\n"
-                        f"💡 Se recomienda cerrar la operación si deseas tomar ganancias."
-                    )
-                    enviar_senal_telegram(mensaje_profit)
-                nuevas_operaciones.append((op, None))
+        if ganancia_pct >= 10 and not op.get("aviso_10pct", False):
+            op["aviso_10pct"] = True
+            mensaje_profit = (
+                f"📈 *AVISO DE CIERRE*\n\n"
+                f"📊 Par: {op['mercado']}\n"
+                f"🔹 Tipo: {op['tipo']}\n"
+                f"💹 Beneficio actual: {ganancia_pct:.2f}%\n"
+                f"💡 Se recomienda cerrar la operación si deseas tomar ganancias."
+            )
+            enviar_senal_telegram(mensaje_profit)
+        nuevas_operaciones.append((op, None))
 
-    OPERACIONES_ABIERTAS = [op for op, estado in nuevas_operaciones if estado is None]
+    OPERACIONES_ABIERTAS = [op for op, estado, *_ in nuevas_operaciones if estado is None]
 
-    for op, estado in nuevas_operaciones:
+    for op, estado, *detalle_cierre in nuevas_operaciones:
         if estado is None:
             continue
+        nivel_alcanzado, precio_nivel = detalle_cierre
         mensaje_cierre = (
             f"🧾 *CIERRE DE OPERACIÓN*\n\n"
             f"📊 Par: {op['mercado']}\n"
@@ -413,6 +422,7 @@ def actualizar_operaciones_abiertas(cierres, datos, mercado):
             f"💵 Entrada: $ {op['entrada']:,.2f}\n"
             f"🛑 Stop: $ {op['stop_loss']:,.2f}\n"
             f"🎯 Take Profit: $ {op['take_profit']:,.2f}\n"
+            f"📍 Precio alcanzó: {nivel_alcanzado} ($ {precio_nivel:,.2f})\n"
             f"✅ Resultado: {estado.upper()}"
         )
         enviar_senal_telegram(mensaje_cierre)
@@ -730,6 +740,7 @@ def registrar_senal_emitida(mercado, direccion, precio_actual, stop_loss, take_p
         "take_profit": take_profit,
         "apalancamiento": apalancamiento,
         "aviso_10pct": False,
+        "creado_en": int(time.time() * 1000),
     })
     if tipo == "auto":
         ULTIMA_SENAL_AUTOMATICA = {"timestamp": time.time(), "mercado": mercado["nombre"], "direccion": direccion}
@@ -899,6 +910,14 @@ def motor_de_trading():
             limpiar_solicitudes_si_es_necesario()
             hora_actual = hora_espana()
             senal_enviada = False
+
+            for mercado in CONFIGURACIONES_MERCADO:
+                if not any(op["mercado"] == mercado["nombre"] for op in OPERACIONES_ABIERTAS):
+                    continue
+                datos_seguimiento = obtener_datos_binance(mercado["symbol"], "1m", limit=5)
+                if datos_seguimiento:
+                    cierres_seguimiento = [float(vela[4]) for vela in datos_seguimiento]
+                    actualizar_operaciones_abiertas(cierres_seguimiento, datos_seguimiento, mercado)
 
             if not AUTO_SIGNAL_ENABLED:
                 print("🛑 Señales automáticas desactivadas. Solo se atenderán solicitudes manuales.")
