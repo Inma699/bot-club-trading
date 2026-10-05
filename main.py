@@ -6,9 +6,11 @@ import ccxt
 import numpy as np
 import pandas as pd
 import psycopg2
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask
+import anthropic
 
 app = Flask(__name__)
 
@@ -19,6 +21,25 @@ def home():
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+# === INTEGRACIÓN ANTHROPIC (ANÁLISIS MACRO "ESTILO TRUMP") ===
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest").strip()
+ANALISIS_TRUMP_ENABLED = os.getenv("ANALISIS_TRUMP_ENABLED", "true").strip().lower() in {"1", "true", "on", "si", "sí"}
+# Cliente perezoso: solo se crea si hay clave configurada, para no romper el arranque si falta.
+_cliente_anthropic = None
+if ANTHROPIC_API_KEY:
+    try:
+        _cliente_anthropic = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    except Exception as error:
+        print(f"⚠️ No se pudo inicializar el cliente Anthropic: {error}")
+        _cliente_anthropic = None
+else:
+    print("ℹ️ ANTHROPIC_API_KEY no configurada. El análisis macro 'estilo Trump' quedará desactivado.")
+
+# Caché del análisis macro diario para no disparar llamadas a Claude en cada señal.
+CACHE_ANALISIS_TRUMP = {"fecha_hora": None, "texto": None}
+ANALISIS_TRUMP_TTL_SEGUNDOS = int(os.getenv("ANALISIS_TRUMP_TTL_SEGUNDOS", "3600"))
 
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
@@ -34,6 +55,10 @@ ESTADISTICAS = {
     "perdidas": 0,
     "ultimo_resumen": None,
 }
+
+# Hora (Europe/Madrid, formato HH:MM) y control del parte diario automático de "la mente de Trump"
+PARTE_TRUMP_HORA = os.getenv("PARTE_TRUMP_HORA", "08:00").strip()
+ULTIMO_PARTE_TRUMP_ENVIADO = None
 
 # === SEGUIMIENTO DE OPERACIONES ABIERTAS ===
 OPERACIONES_ABIERTAS = []
@@ -126,6 +151,109 @@ def resetear_estado_diario_si_es_necesario():
         ESTADO_DIARIO["senales_manuales_hoy"] = 0
         ESTADO_DIARIO["minimo_senales_alcanzado"] = False
         ESTADO_DIARIO["minimo_senales_automaticas_alcanzado"] = False
+
+
+def obtener_noticias_gratis(consulta, max_items=6, idioma="es-419", pais="US"):
+    """
+    Lee titulares recientes usando el feed RSS público y gratuito de Google News
+    (no requiere API key). Devuelve una lista de titulares (str).
+    """
+    try:
+        url = "https://news.google.com/rss/search"
+        params = {
+            "q": consulta,
+            "hl": idioma,
+            "gl": pais,
+            "ceid": f"{pais}:{idioma.split('-')[0]}",
+        }
+        respuesta = requests.get(url, params=params, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        respuesta.raise_for_status()
+        raiz = ET.fromstring(respuesta.content)
+        titulares = []
+        for item in raiz.findall(".//item")[:max_items]:
+            titulo = item.findtext("title")
+            if titulo:
+                titulares.append(titulo.strip())
+        return titulares
+    except Exception as error:
+        print(f"⚠️ No se pudieron obtener noticias para '{consulta}': {error}")
+        return []
+
+
+def recopilar_noticias_macro_diarias():
+    """Agrupa titulares del día sobre Trump, Bitcoin y la Fed desde una fuente gratuita."""
+    consultas = {
+        "Donald Trump economía": "Donald Trump economy OR tariffs OR Federal Reserve",
+        "Bitcoin": "Bitcoin price OR crypto market",
+        "Reserva Federal": "Federal Reserve interest rates OR Jerome Powell",
+    }
+    bloque_noticias = {}
+    for etiqueta, consulta in consultas.items():
+        bloque_noticias[etiqueta] = obtener_noticias_gratis(consulta, max_items=5)
+    return bloque_noticias
+
+
+def generar_analisis_trump_ia(forzar=False):
+    """
+    Usa la API oficial de Anthropic (Claude) para generar un análisis de sentimiento
+    macro de mercado, narrado con la personalidad retórica de Donald Trump, a partir
+    de titulares de noticias reales del día sobre Trump, Bitcoin y la Fed.
+
+    Devuelve un texto breve listo para insertar en los mensajes de Telegram.
+    Si Anthropic no está configurado o falla, devuelve None (no rompe el flujo del bot).
+    """
+    global CACHE_ANALISIS_TRUMP
+
+    if not ANALISIS_TRUMP_ENABLED or _cliente_anthropic is None:
+        return None
+
+    ahora = time.time()
+    cache_valida = (
+        CACHE_ANALISIS_TRUMP["fecha_hora"] is not None
+        and (ahora - CACHE_ANALISIS_TRUMP["fecha_hora"]) < ANALISIS_TRUMP_TTL_SEGUNDOS
+    )
+    if cache_valida and not forzar:
+        return CACHE_ANALISIS_TRUMP["texto"]
+
+    noticias = recopilar_noticias_macro_diarias()
+    resumen_noticias = []
+    for etiqueta, titulares in noticias.items():
+        if titulares:
+            resumen_noticias.append(f"{etiqueta}:\n" + "\n".join(f"- {t}" for t in titulares))
+    texto_noticias = "\n\n".join(resumen_noticias) if resumen_noticias else "Sin titulares disponibles hoy."
+
+    dia_semana = hora_espana().strftime("%A")
+    prompt = (
+        "Eres un analista de mercados que redacta un breve parte macro DIARIO para un canal de trading de BTC/USDT. "
+        "Debes narrarlo imitando el ESTILO RETÓRICO de Donald Trump (frases cortas, contundente, mayúsculas ocasionales "
+        "para énfasis, superlativos como 'tremendo', 'nadie lo ha visto nunca', 'increíble'), pero el contenido debe ser "
+        "un análisis de sentimiento de mercado SERIO y útil, basado ÚNICAMENTE en los titulares reales que te paso abajo. "
+        "No inventes declaraciones textuales de Trump ni cites frases como si fueran suyas; es una PARODIA analítica, "
+        "no una cita real. Al final añade una conclusión sobre si el sesgo del día es alcista, bajista o neutro para BTC, "
+        "y qué día de la semana (de los próximos 7) ves con más probabilidad de un movimiento fuerte, justificando brevemente "
+        "por qué (ej. reunión de la Fed, fecha de anuncio, vencimiento de opciones, etc. si aparece en las noticias). "
+        f"Hoy es {dia_semana}. Máximo 90 palabras. Responde en español. Incluye SIEMPRE un disclaimer final corto de que "
+        "esto no es consejo financiero.\n\n"
+        f"TITULARES DE HOY:\n{texto_noticias}"
+    )
+
+    try:
+        respuesta = _cliente_anthropic.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        texto = "".join(
+            bloque.text for bloque in respuesta.content if getattr(bloque, "type", None) == "text"
+        ).strip()
+        if texto:
+            CACHE_ANALISIS_TRUMP["fecha_hora"] = ahora
+            CACHE_ANALISIS_TRUMP["texto"] = texto
+            return texto
+    except Exception as error:
+        print(f"⚠️ Error consultando Anthropic/Claude para el análisis macro: {error}")
+
+    return CACHE_ANALISIS_TRUMP["texto"]
 
 
 def evaluar_noticias_alto_impacto(hora_actual):
@@ -463,6 +591,8 @@ def enviar_resumen_diario():
     global ESTADISTICAS
     hoy = time.strftime("%Y-%m-%d")
     ratio = round((ESTADISTICAS['ganadas'] / max(ESTADISTICAS['total_senales'], 1)) * 100, 1)
+    analisis_trump = generar_analisis_trump_ia(forzar=True)
+    macro_texto = f"\n\n🗣️ *Lectura macro del día (estilo Trump, vía IA):*\n{analisis_trump}" if analisis_trump else ""
     resumen = (
         f"📊 *RESUMEN DIARIO CLUB MARKETSHARKS*\n\n"
         f"📅 Fecha: {hoy}\n"
@@ -472,9 +602,33 @@ def enviar_resumen_diario():
         f"✅ Ganadas: {ESTADISTICAS['ganadas']}\n"
         f"❌ Perdidas: {ESTADISTICAS['perdidas']}\n"
         f"📈 Ratio: {ratio}%"
+        f"{macro_texto}"
     )
     enviar_senal_telegram(resumen)
     ESTADISTICAS["ultimo_resumen"] = hoy
+
+
+def enviar_parte_diario_mente_trump(chat_id=None):
+    """
+    Envía a Telegram un mensaje dedicado con la 'lectura macro estilo Trump' generada
+    por Claude (Anthropic) a partir de noticias reales del día sobre Trump, Bitcoin y la Fed,
+    incluyendo su opinión sobre qué día de la semana podría moverse BTC con fuerza.
+    """
+    analisis_trump = generar_analisis_trump_ia(forzar=True)
+    if not analisis_trump:
+        mensaje = (
+            "🧠 *LA MENTE DE TRUMP SOBRE BTC*\n\n"
+            "⚠️ No se pudo generar el análisis macro ahora mismo (falta ANTHROPIC_API_KEY o hubo un error de red). "
+            "Inténtalo de nuevo más tarde."
+        )
+    else:
+        mensaje = (
+            "🧠 *LA MENTE DE TRUMP SOBRE BTC* 🇺🇸\n\n"
+            f"{analisis_trump}\n\n"
+            "ℹ️ Generado por IA (Claude/Anthropic) a partir de titulares reales del día. "
+            "Es una parodia analítica, NO declaraciones reales de Donald Trump ni asesoramiento financiero."
+        )
+    enviar_senal_telegram(mensaje, chat_id=chat_id)
 
 
 def calcular_niveles_senal(direccion, precio, cierres, altos, bajos):
@@ -537,6 +691,10 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
         direccion_texto = "🟢 *Dirección:* COMPRA"
     else:
         direccion_texto = "🔴 *Dirección:* VENTA"
+
+    analisis_trump = generar_analisis_trump_ia()
+    macro_texto = f"\n\n🗣️ *Lectura macro (estilo Trump, vía IA):*\n{analisis_trump}" if analisis_trump else ""
+
     return (
         f"{prefijo}\n\n"
         f"{tipo_texto}\n"
@@ -552,6 +710,7 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
         f"⚙️ *Apalancamiento recomendado:* 75x\n\n"
         f"📈 *EMA 200:* $ {ema_200:,.2f} USD\n"
         f"⚡ *Fuerza movimiento:* {fuerza:.2f}% | *Contexto:* {motivo}{flujo_texto}{liquidacion_texto}"
+        f"{macro_texto}"
     )
 
 
@@ -877,6 +1036,21 @@ def calcular_cci_binarias(velas, periodo=14):
     return float(((precio_tipico - media) / (0.015 * desviacion)).iloc[-1])
 
 
+def calcular_rsi_binarias(velas, periodo=14):
+    """RSI clásico de Wilder sobre el cierre de las velas sintéticas de 10s, usado como
+    filtro adicional de momentum para evitar entradas en zonas de agotamiento (sobrecompra/sobreventa)."""
+    cierre = velas["close"]
+    delta = cierre.diff()
+    ganancia = delta.clip(lower=0)
+    perdida = -delta.clip(upper=0)
+    media_ganancia = ganancia.ewm(alpha=1 / periodo, min_periods=periodo, adjust=False).mean()
+    media_perdida = perdida.ewm(alpha=1 / periodo, min_periods=periodo, adjust=False).mean()
+    rs = media_ganancia / media_perdida.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    valor = rsi.iloc[-1]
+    return float(valor) if pd.notna(valor) else 50.0
+
+
 def actualizar_contexto_binarias(exchange_binarias):
     columnas = ["timestamp", "open", "high", "low", "close", "volume"]
     barras_1m = exchange_binarias.fetch_ohlcv(SIMBOLO_BINARIAS, timeframe="1m", limit=100)
@@ -926,11 +1100,15 @@ def actualizar_contexto_binarias(exchange_binarias):
     volumen_referencia = cerradas["volume"].iloc[-21:-1].mean()
     ratio_volumen = float(cerradas["volume"].iloc[-1] / volumen_referencia) if volumen_referencia > 0 else 0.0
 
+    precio_referencia = float(velas_1m["close"].iloc[-1])
+    atr_porcentual = (atr_macro / precio_referencia * 100) if precio_referencia > 0 else 0.0
+
     return {
         "techo": centro + desviacion * 2.0,
         "piso": centro - desviacion * 2.0,
         "centro": centro,
         "atr": atr_macro,
+        "atr_pct": atr_porcentual,
         "tendencia": tendencia,
         "adx": adx if np.isfinite(adx) else 0.0,
         "ratio_volumen": ratio_volumen,
@@ -1001,6 +1179,7 @@ def motor_senales_binarias():
             ema5 = velas_10s["close"].ewm(span=5, adjust=False).mean()
             ema13 = velas_10s["close"].ewm(span=13, adjust=False).mean()
             cci = calcular_cci_binarias(velas_10s)
+            rsi = calcular_rsi_binarias(velas_10s)
             hora = hora_espana().strftime("%H:%M:%S")
             techo = contexto["techo"]
             piso = contexto["piso"]
@@ -1008,16 +1187,32 @@ def motor_senales_binarias():
             adx = contexto["adx"]
             ratio_volumen = contexto["ratio_volumen"]
             atr = contexto["atr"]
+            # ATR normalizado (% del precio) en vez de ATR absoluto en USD: así los umbrales de
+            # expiración siguen siendo válidos aunque BTC cotice muy por encima o por debajo del
+            # rango histórico de referencia (la volatilidad absoluta escala con el precio).
+            atr_pct = contexto.get("atr_pct", 0.0)
 
-            if atr > 50:
+            if atr_pct > 0.12:
                 expiracion = "1 MINUTO"
-            elif atr > 35:
+            elif atr_pct > 0.07:
                 expiracion = "2 MINUTOS"
             else:
                 expiracion = "5 MINUTOS"
 
-            ruptura_alcista = cierre > techo and contexto["tendencia"] == "ALCISTA" and adx >= 25 and ratio_volumen >= 1.3 and cci > 0
-            ruptura_bajista = cierre < piso and contexto["tendencia"] == "BAJISTA" and adx >= 25 and ratio_volumen >= 1.3 and cci < 0
+            # Filtro de momentum con RSI: evita abrir rupturas cuando el activo ya está
+            # agotado (sobrecompra >75 para LONG, sobreventa <25 para SHORT), reduciendo
+            # falsas señales en reversiones inminentes.
+            rsi_valido_largo = rsi < 75
+            rsi_valido_corto = rsi > 25
+
+            ruptura_alcista = (
+                cierre > techo and contexto["tendencia"] == "ALCISTA" and adx >= 25
+                and ratio_volumen >= 1.3 and cci > 0 and rsi_valido_largo
+            )
+            ruptura_bajista = (
+                cierre < piso and contexto["tendencia"] == "BAJISTA" and adx >= 25
+                and ratio_volumen >= 1.3 and cci < 0 and rsi_valido_corto
+            )
             duracion = "30-60 min" if adx >= 45 else "20-40 min" if adx >= 35 else "10-30 min"
 
             if not (piso <= cierre <= techo):
@@ -1026,7 +1221,7 @@ def motor_senales_binarias():
                     enviar_alerta_binaria(
                         f"🚀 RUPTURA ALCISTA FUERTE | LONG\nSímbolo: {SIMBOLO_BINARIAS}\n"
                         f"Precio: {cierre:,.1f}\nHora: {hora}\nExpiración: {expiracion}\n"
-                        f"ADX 5m: {adx:.1f} | Volumen: {ratio_volumen:.1f}x\n"
+                        f"ADX 5m: {adx:.1f} | Volumen: {ratio_volumen:.1f}x | RSI: {rsi:.1f}\n"
                         f"Duración orientativa: {duracion} (no garantizada)"
                     )
                 elif ruptura_bajista and ultima_ruptura != "SHORT":
@@ -1034,7 +1229,7 @@ def motor_senales_binarias():
                     enviar_alerta_binaria(
                         f"🔻 RUPTURA BAJISTA FUERTE | SHORT\nSímbolo: {SIMBOLO_BINARIAS}\n"
                         f"Precio: {cierre:,.1f}\nHora: {hora}\nExpiración: {expiracion}\n"
-                        f"ADX 5m: {adx:.1f} | Volumen: {ratio_volumen:.1f}x\n"
+                        f"ADX 5m: {adx:.1f} | Volumen: {ratio_volumen:.1f}x | RSI: {rsi:.1f}\n"
                         f"Duración orientativa: {duracion} (no garantizada)"
                     )
             else:
@@ -1044,19 +1239,25 @@ def motor_senales_binarias():
             ema5_previa, ema13_previa = ema5.iloc[-2], ema13.iloc[-2]
             if ema5_actual > ema13_actual and ema5_previa <= ema13_previa and ultima_direccion != "COMPRA":
                 ultima_direccion = "COMPRA"
-                if cierre <= centro and atr >= 35 and contexto["tendencia"] == "ALCISTA" and cci > 0:
+                if (
+                    cierre <= centro and atr >= 35 and contexto["tendencia"] == "ALCISTA"
+                    and cci > 0 and rsi_valido_largo and rsi >= 50
+                ):
                     situacion = "RUPTURA ALCISTA" if cierre > techo else "REBOTE EN PISO"
                     enviar_alerta_binaria(
                         f"🚀 LONG CONFIRMADO\nSímbolo: {SIMBOLO_BINARIAS}\nPrecio: {cierre:,.1f}\n"
-                        f"Hora: {hora}\nContexto: {situacion}\nExpiración: {expiracion}"
+                        f"Hora: {hora}\nContexto: {situacion}\nRSI: {rsi:.1f}\nExpiración: {expiracion}"
                     )
             elif ema5_actual < ema13_actual and ema5_previa >= ema13_previa and ultima_direccion != "VENTA":
                 ultima_direccion = "VENTA"
-                if cierre >= centro and atr >= 35 and contexto["tendencia"] == "BAJISTA" and cci < 0:
+                if (
+                    cierre >= centro and atr >= 35 and contexto["tendencia"] == "BAJISTA"
+                    and cci < 0 and rsi_valido_corto and rsi <= 50
+                ):
                     situacion = "RUPTURA BAJISTA" if cierre < piso else "REBOTE EN TECHO"
                     enviar_alerta_binaria(
                         f"🔻 SHORT CONFIRMADO\nSímbolo: {SIMBOLO_BINARIAS}\nPrecio: {cierre:,.1f}\n"
-                        f"Hora: {hora}\nContexto: {situacion}\nExpiración: {expiracion}"
+                        f"Hora: {hora}\nContexto: {situacion}\nRSI: {rsi:.1f}\nExpiración: {expiracion}"
                     )
             elif abs(ema5_actual - ema13_actual) > 2.0:
                 ultima_direccion = None
@@ -1093,6 +1294,8 @@ def telegram_listener():
                         generar_senal_manual(chat_id=chat_id, requester_id=user_id)
                     if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
+                    if text in {"/trump", "/mentetrump", "/trumpmind", "trump", "mentetrump"}:
+                        enviar_parte_diario_mente_trump(chat_id=chat_id)
                 if "callback_query" in update:
                     callback = update["callback_query"]
                     chat_id = callback.get("message", {}).get("chat", {}).get("id")
@@ -1204,6 +1407,15 @@ def motor_de_trading():
 
             if time.strftime("%H:%M") == "00:00" and ESTADISTICAS["ultimo_resumen"] != time.strftime("%Y-%m-%d"):
                 enviar_resumen_diario()
+
+            global ULTIMO_PARTE_TRUMP_ENVIADO
+            hoy_str = hora_actual.strftime("%Y-%m-%d")
+            if hora_actual.strftime("%H:%M") == PARTE_TRUMP_HORA and ULTIMO_PARTE_TRUMP_ENVIADO != hoy_str:
+                try:
+                    enviar_parte_diario_mente_trump(chat_id=CHAT_ID_CANAL)
+                    ULTIMO_PARTE_TRUMP_ENVIADO = hoy_str
+                except Exception as error:
+                    print(f"⚠️ No se pudo enviar el parte diario de 'la mente de Trump': {error}")
 
             time.sleep(60)
         except Exception as e:
