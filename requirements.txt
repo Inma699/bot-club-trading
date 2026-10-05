@@ -6,3 +6,4 @@ ccxt
 pandas
 numpy
 psycopg2-binary==2.9.9
+anthropic==1.11.0
