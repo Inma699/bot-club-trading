@@ -18,13 +18,37 @@ app = Flask(__name__)
 def home():
     return "Club MarketSharks - Algoritmo Espejo TradingView Activo", 200
 
+# === CLIENTE CCXT COMPARTIDO (BITGET) ===
+# Render bloquea Binance (HTTP 451 por restricción geográfica), así que usamos
+# la API pública de Bitget vía CCXT como fuente principal de precios/velas.
+_EXCHANGE_BITGET = ccxt.bitget({"enableRateLimit": True})
+
+# Mapeo de intervalos usados internamente (formato Binance) al formato CCXT/Bitget.
+_MAPA_INTERVALOS_CCXT = {
+    "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+    "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "12h": "12h", "1d": "1d",
+}
+
+
+def _symbol_spot_ccxt(symbol):
+    """Convierte 'BTCUSDT' al formato spot de CCXT: 'BTC/USDT'."""
+    symbol = str(symbol).upper()
+    if symbol.endswith("USDT"):
+        return f"{symbol[:-4]}/USDT"
+    return symbol
+
+
+def _symbol_futuros_ccxt(symbol):
+    """Convierte 'BTCUSDT' al formato de perpetuo USDT-M de CCXT: 'BTC/USDT:USDT'."""
+    return f"{_symbol_spot_ccxt(symbol)}:USDT"
+
 # === CREDENCIALES DESDE ENVIRONMENT VARIABLES ===
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 # === INTEGRACIÓN ANTHROPIC (ANÁLISIS MACRO "ESTILO TRUMP") ===
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest").strip()
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5").strip()
 ANALISIS_TRUMP_ENABLED = os.getenv("ANALISIS_TRUMP_ENABLED", "true").strip().lower() in {"1", "true", "on", "si", "sí"}
 # Cliente perezoso: solo se crea si hay clave configurada, para no romper el arranque si falta.
 _cliente_anthropic = None
@@ -295,21 +319,25 @@ def evaluar_impulso_fuerte(cierres, aperturas, altos, bajos, volumenes, precio_a
 
 
 def obtener_datos_binance(symbol, interval, limit=210):
-    urls = [
-        ("https://api.binance.com/api/v3/klines", {}),
-        ("https://api.binance.us/api/v3/klines", {}),
-    ]
-    symbols = [symbol]
-    for candidate_symbol in symbols:
-        params = {"symbol": candidate_symbol, "interval": interval, "limit": limit}
-        for url, extra_params in urls:
-            try:
-                response = requests.get(url, params={**params, **extra_params}, timeout=10)
-                if response.status_code == 200:
-                    return response.json()
-                print(f"⚠️ {url} devolvió estado {response.status_code} para {candidate_symbol} {interval}: {response.text[:200]}")
-            except Exception as e:
-                print(f"⚠️ Error consultando {url} para {candidate_symbol} {interval}: {e}")
+    """
+    Obtiene velas (klines) de mercado SPOT para `symbol` (ej. 'BTCUSDT').
+
+    NOTA: Render bloquea las IPs de Binance con error 451 (restricción geográfica),
+    así que usamos Bitget (vía CCXT) como fuente principal, con Kraken como respaldo.
+    El formato de salida se mantiene idéntico al de Binance klines:
+    [timestamp, open, high, low, close, volume] para máxima compatibilidad con el
+    resto del bot (order blocks, EMA, flujo de capital, etc.).
+    """
+    timeframe = _MAPA_INTERVALOS_CCXT.get(interval, interval)
+    par_ccxt = _symbol_spot_ccxt(symbol)
+    try:
+        velas = _EXCHANGE_BITGET.fetch_ohlcv(par_ccxt, timeframe=timeframe, limit=limit)
+        if velas:
+            print(f"✅ Velas obtenidas de Bitget (spot) para {symbol} {interval}: {len(velas)}")
+            return velas
+        print(f"⚠️ Bitget no devolvió velas para {par_ccxt} {interval}")
+    except Exception as e:
+        print(f"⚠️ Error consultando Bitget (CCXT) para {par_ccxt} {interval}: {e}")
 
     datos_kraken = obtener_datos_kraken(symbol, interval, limit)
     if datos_kraken:
@@ -360,52 +388,70 @@ def obtener_datos_kraken(symbol, interval, limit=210):
 
 
 def obtener_datos_binance_futuros(symbol, interval, limit=210):
-    urls = [
-        ("https://api.binance.us/fapi/v1/klines", {}),
-        ("https://fapi.binance.com/fapi/v1/klines", {}),
-        ("https://fstream.binance.com/fapi/v1/klines", {}),
-    ]
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    for url, extra_params in urls:
-        try:
-            response = requests.get(url, params={**params, **extra_params}, timeout=10)
-            if response.status_code == 200:
-                return response.json()
-            print(f"⚠️ {url} devolvió estado {response.status_code} para {symbol} {interval}: {response.text[:200]}")
-        except Exception as e:
-            print(f"⚠️ Error consultando {url} para {symbol} {interval}: {e}")
+    """
+    Obtiene velas (klines) de FUTUROS perpetuos USDT-M para `symbol` (ej. 'BTCUSDT').
+
+    Usa Bitget (vía CCXT) en lugar de Binance Futures, ya que Render bloquea
+    las IPs de Binance (HTTP 451). Formato de salida idéntico a Binance klines.
+    """
+    timeframe = _MAPA_INTERVALOS_CCXT.get(interval, interval)
+    par_ccxt = _symbol_futuros_ccxt(symbol)
+    try:
+        velas = _EXCHANGE_BITGET.fetch_ohlcv(par_ccxt, timeframe=timeframe, limit=limit)
+        if velas:
+            print(f"✅ Velas de futuros obtenidas de Bitget para {symbol} {interval}: {len(velas)}")
+            return velas
+        print(f"⚠️ Bitget no devolvió velas de futuros para {par_ccxt} {interval}")
+    except Exception as e:
+        print(f"⚠️ Error consultando futuros Bitget (CCXT) para {par_ccxt} {interval}: {e}")
     return None
 
 
 def obtener_ticker_24h(symbol):
-    urls = [
-        ("https://fapi.binance.com/fapi/v1/ticker/24hr", {"symbol": symbol}),
-        ("https://api.binance.us/fapi/v1/ticker/24hr", {"symbol": symbol}),
-    ]
-    for url, params in urls:
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            print(f"⚠️ Error consultando ticker 24h en {url}: {e}")
-    return None
+    """
+    Devuelve un dict compatible con el formato 'ticker 24hr' de Binance
+    (claves: priceChangePercent, lastPrice, volume, etc.) pero obtenido desde
+    Bitget vía CCXT, ya que Binance Futures está bloqueado en Render (HTTP 451).
+    """
+    par_ccxt = _symbol_futuros_ccxt(symbol)
+    try:
+        ticker = _EXCHANGE_BITGET.fetch_ticker(par_ccxt)
+        cambio_pct = ticker.get("percentage")
+        if cambio_pct is None:
+            # Fallback: calcular el % de cambio a partir de open/last si CCXT no lo trae.
+            precio_apertura = ticker.get("open")
+            precio_actual = ticker.get("last") or ticker.get("close")
+            if precio_apertura and precio_actual:
+                cambio_pct = ((precio_actual - precio_apertura) / precio_apertura) * 100
+            else:
+                cambio_pct = 0.0
+        return {
+            "priceChangePercent": cambio_pct,
+            "lastPrice": ticker.get("last"),
+            "volume": ticker.get("baseVolume"),
+            "highPrice": ticker.get("high"),
+            "lowPrice": ticker.get("low"),
+        }
+    except Exception as e:
+        print(f"⚠️ Error consultando ticker 24h en Bitget (CCXT) para {par_ccxt}: {e}")
+        return None
 
 
 def obtener_funding_rate(symbol):
-    urls = [
-        ("https://api.binance.us/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
-        ("https://fapi.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
-        ("https://fstream.binance.com/fapi/v1/fundingRate", {"symbol": symbol, "limit": 2}),
-    ]
-    for url, params in urls:
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            print(f"⚠️ Error consultando funding rate en {url}: {e}")
-    return None
+    """
+    Devuelve una lista compatible con el formato de Binance fundingRate
+    (lista de dicts con clave 'fundingRate'), obtenida desde Bitget vía CCXT.
+    """
+    par_ccxt = _symbol_futuros_ccxt(symbol)
+    try:
+        funding = _EXCHANGE_BITGET.fetch_funding_rate(par_ccxt)
+        tasa = funding.get("fundingRate")
+        if tasa is None:
+            return None
+        return [{"fundingRate": tasa, "symbol": symbol}]
+    except Exception as e:
+        print(f"⚠️ Error consultando funding rate en Bitget (CCXT) para {par_ccxt}: {e}")
+        return None
 
 
 def evaluar_flujo_capital(precio_actual, ema_200, cierres, volumenes, ticker_24h, funding_rate):
@@ -1122,7 +1168,7 @@ def enviar_alerta_binaria(mensaje):
 
 def motor_senales_binarias():
     print(f"📡 Motor de señales binarias iniciado para {SIMBOLO_BINARIAS}.")
-    exchange_binarias = ccxt.bitget({"enableRateLimit": True})
+    exchange_binarias = _EXCHANGE_BITGET
     contexto = None
     ultimo_intento_contexto = 0.0
     ultima_actualizacion_contexto = 0.0
