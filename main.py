@@ -1,16 +1,23 @@
+import asyncio
 import os
 import threading
 import time
 import requests
 import ccxt
+from math import isfinite
 import numpy as np
 import pandas as pd
 import psycopg2
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from flask import Flask
 import anthropic
+from sfp_strategy import (
+    SFPReclaimDetector,
+    calculate_exit_prices,
+    previous_day_levels,
+)
 
 app = Flask(__name__)
 
@@ -134,6 +141,18 @@ ULTIMA_SENAL_AUTOMATICA = None
 DETENER_BOT = threading.Event()
 BINARIAS_ENABLED = os.getenv("BINARIAS_ENABLED", "true").strip().lower() in {"1", "true", "on", "si", "sí"}
 SIMBOLO_BINARIAS = os.getenv("BINARIAS_SYMBOL", "BTC/USDT:USDT")
+
+# === ESTRATEGIA SFP (DESACTIVADA POR DEFECTO) ===
+SFP_ENABLED = os.getenv("SFP_ENABLED", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
+SFP_LIVE_TRADING = os.getenv("SFP_LIVE_TRADING", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
+SFP_SYMBOL = "BTC/USDT:USDT"
+SFP_MARGIN_USDT = 1.0
+SFP_LEVERAGE = 70
+SFP_STOP_ROE_PERCENT = 20.0
+SFP_TAKE_PROFIT_ROE_PERCENT = 50.0
+SFP_SWEEP_DEVIATION = 0.0025
+SFP_COOLDOWN_SECONDS = 900
+SFP_HEDGED_MODE = os.getenv("SFP_HEDGED_MODE", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
 
 
 @app.route('/stop')
@@ -1313,6 +1332,243 @@ def motor_senales_binarias():
             time.sleep(2)
 
 
+async def _enviar_alerta_sfp(mensaje):
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, enviar_senal_telegram, mensaje)
+
+
+async def _cargar_niveles_sfp(exchange):
+    velas = await exchange.fetch_ohlcv(SFP_SYMBOL, timeframe="1d", limit=3)
+    return previous_day_levels(velas, datetime.now(timezone.utc))
+
+
+async def _abrir_operacion_sfp(exchange, direccion, precio):
+    posiciones = await exchange.fetch_positions([SFP_SYMBOL])
+    for posicion in posiciones:
+        if posicion.get("symbol") != SFP_SYMBOL:
+            continue
+        contratos = posicion.get("contracts")
+        if contratos is None:
+            raise RuntimeError("Bitget devolvió una posición sin cantidad verificable; se cancela la entrada.")
+        if abs(float(contratos)) > 0:
+            print("⏸️ SFP: ya existe una posición abierta en BTC/USDT:USDT; se omite esta entrada.")
+            return None
+
+    mercado = exchange.market(SFP_SYMBOL)
+    if not mercado.get("swap") or not mercado.get("linear") or mercado.get("inverse"):
+        raise RuntimeError(f"{SFP_SYMBOL} no está cargado como perpetuo lineal USDT-M.")
+
+    tamano_contrato = float(mercado.get("contractSize") or 0)
+    if tamano_contrato <= 0:
+        raise RuntimeError("Bitget no informó un tamaño de contrato válido para calcular la orden.")
+
+    notional_maximo = SFP_MARGIN_USDT * SFP_LEVERAGE
+    cantidad_sin_redondear = notional_maximo / (precio * tamano_contrato)
+    cantidad = float(exchange.amount_to_precision(SFP_SYMBOL, cantidad_sin_redondear))
+    notional = cantidad * tamano_contrato * precio
+    cantidad_minima = mercado.get("limits", {}).get("amount", {}).get("min")
+    if cantidad <= 0 or (cantidad_minima is not None and cantidad < float(cantidad_minima)):
+        raise RuntimeError("El tamaño calculado es inferior al mínimo de Bitget.")
+    if notional > notional_maximo * (1 + 1e-10):
+        raise RuntimeError(f"El redondeo de cantidad excede el nominal máximo de {notional_maximo:.2f} USDT.")
+
+    stop_loss, take_profit = calculate_exit_prices(
+        direccion,
+        precio,
+        SFP_LEVERAGE,
+        SFP_STOP_ROE_PERCENT,
+        SFP_TAKE_PROFIT_ROE_PERCENT,
+    )
+    lado = "buy" if direccion == "COMPRA" else "sell"
+    await exchange.set_margin_mode("isolated", SFP_SYMBOL)
+    await exchange.set_leverage(SFP_LEVERAGE, SFP_SYMBOL)
+    parametros = {
+        "marginMode": "isolated",
+        "hedged": SFP_HEDGED_MODE,
+        "clientOrderId": f"SFP-{int(time.time() * 1000)}",
+        "stopLoss": {
+            "triggerPrice": exchange.price_to_precision(SFP_SYMBOL, stop_loss),
+            "type": "mark_price",
+        },
+        "takeProfit": {
+            "triggerPrice": exchange.price_to_precision(SFP_SYMBOL, take_profit),
+            "type": "mark_price",
+        },
+    }
+    orden = await exchange.create_order(
+        SFP_SYMBOL,
+        "market",
+        lado,
+        cantidad,
+        None,
+        parametros,
+    )
+    if not orden or not orden.get("id"):
+        raise RuntimeError("Bitget no confirmó un identificador para la orden de entrada.")
+    return orden, stop_loss, take_profit, notional
+
+
+async def _motor_sfp_async():
+    import ccxt.pro as ccxtpro
+
+    api_key = os.getenv("BITGET_API_KEY", "").strip()
+    secret = os.getenv("BITGET_SECRET_KEY", "").strip()
+    password = os.getenv("BITGET_API_PASSWORD", "").strip()
+    if SFP_LIVE_TRADING and not all((api_key, secret, password)):
+        raise RuntimeError(
+            "SFP_LIVE_TRADING=true requiere BITGET_API_KEY, BITGET_SECRET_KEY y BITGET_API_PASSWORD."
+        )
+
+    exchange = ccxtpro.bitget({
+        "apiKey": api_key,
+        "secret": secret,
+        "password": password,
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap", "defaultSubType": "linear"},
+    })
+    try:
+        await exchange.load_markets()
+        mercado = exchange.market(SFP_SYMBOL)
+        if not mercado.get("swap") or not mercado.get("linear") or mercado.get("inverse"):
+            raise RuntimeError(f"Bitget no ofrece {SFP_SYMBOL} como perpetuo lineal.")
+        apalancamiento_maximo = mercado.get("limits", {}).get("leverage", {}).get("max")
+        if apalancamiento_maximo is not None and SFP_LEVERAGE > float(apalancamiento_maximo):
+            raise RuntimeError(
+                f"Bitget limita el apalancamiento de {SFP_SYMBOL} a {apalancamiento_maximo}x."
+            )
+
+        print(
+            f"📡 Motor SFP conectado a Bitget para {SFP_SYMBOL}. "
+            f"Órdenes reales: {'ON' if SFP_LIVE_TRADING else 'OFF'}."
+        )
+        detector = SFPReclaimDetector()
+        niveles = None
+        cooldown_hasta = 0.0
+        ordenes_reales_bloqueadas = False
+
+        async def actualizar_niveles():
+            nonlocal niveles
+            while not DETENER_BOT.is_set():
+                fecha_utc = datetime.now(timezone.utc).date()
+                if niveles is None or niveles.day != fecha_utc:
+                    try:
+                        nuevos_niveles = await _cargar_niveles_sfp(exchange)
+                        niveles = nuevos_niveles
+                        detector.reset()
+                        print(
+                            f"📊 Niveles SFP UTC {niveles.day}: "
+                            f"PDH={niveles.high:.2f}, PDL={niveles.low:.2f}"
+                        )
+                    except (ccxt.BaseError, ValueError) as error:
+                        print(f"⚠️ No se pudieron actualizar PDH/PDL de Bitget: {error}")
+                        await asyncio.sleep(30)
+                        continue
+                await asyncio.sleep(60)
+
+        async def vigilar_precio():
+            nonlocal cooldown_hasta, ordenes_reales_bloqueadas
+            while not DETENER_BOT.is_set():
+                try:
+                    ticker = await exchange.watch_ticker(SFP_SYMBOL)
+                except ccxt.BaseError as error:
+                    print(f"⚠️ WebSocket SFP de Bitget: {type(error).__name__}: {error}")
+                    await asyncio.sleep(3)
+                    continue
+
+                if niveles is None:
+                    continue
+                precio = ticker.get("last") or ticker.get("close")
+                if precio is None:
+                    print("⚠️ Bitget envió un ticker SFP sin precio last/close.")
+                    continue
+                try:
+                    precio = float(precio)
+                except (TypeError, ValueError):
+                    print(f"⚠️ Bitget envió un precio SFP inválido: {precio!r}")
+                    continue
+                if not isfinite(precio) or precio <= 0:
+                    print(f"⚠️ Bitget envió un precio SFP fuera de rango: {precio!r}")
+                    continue
+                if time.monotonic() < cooldown_hasta:
+                    detector.reset()
+                    continue
+
+                direccion = detector.update(precio, niveles, SFP_SWEEP_DEVIATION)
+                if direccion is None:
+                    continue
+
+                detector.reset()
+                if not SFP_LIVE_TRADING:
+                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    mensaje = (
+                        f"🔔 SFP {direccion} | {SFP_SYMBOL}\n"
+                        f"Nivel barrido y recuperado: {niveles.low if direccion == 'COMPRA' else niveles.high:,.2f}\n"
+                        f"Precio: {precio:,.2f}\n"
+                        "Modo señales; no se envió ninguna orden."
+                    )
+                    print(mensaje)
+                    await _enviar_alerta_sfp(mensaje)
+                    continue
+
+                if ordenes_reales_bloqueadas:
+                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    print("⛔ SFP: órdenes reales bloqueadas tras un error anterior; reinicia el servicio tras revisar Bitget.")
+                    continue
+                try:
+                    resultado = await _abrir_operacion_sfp(exchange, direccion, precio)
+                    if resultado is None:
+                        cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                        continue
+                    orden, stop_loss, take_profit, notional = resultado
+                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    precio_entrada = orden.get("average") or orden.get("price") or precio
+                    origen_entrada = (
+                        "ejecución reportada por Bitget"
+                        if orden.get("average") or orden.get("price")
+                        else "precio detectado al enviar la orden"
+                    )
+                    mensaje = (
+                        "🦈 SEÑAL: OPERA COMO LOS PECES GORDOS INSTITUCIONALES\n"
+                        f"✅ Orden SFP {direccion} enviada | {SFP_SYMBOL}\n"
+                        f"📍 Entrada ({origen_entrada}): {float(precio_entrada):,.2f}\n"
+                        f"🎯 Take Profit: {take_profit:,.2f}\n"
+                        f"🛑 Stop Loss: {stop_loss:,.2f}\n"
+                        f"ID Bitget: {orden['id']} | Nominal aprox.: {notional:,.2f} USDT\n"
+                        f"Margen aislado: {SFP_MARGIN_USDT:.2f} USDT | Apalancamiento: {SFP_LEVERAGE}x"
+                    )
+                    print(mensaje)
+                    await _enviar_alerta_sfp(mensaje)
+                except (ccxt.BaseError, RuntimeError, ValueError, TypeError) as error:
+                    ordenes_reales_bloqueadas = True
+                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    mensaje = (
+                        f"🚨 SFP: error al enviar/verificar la orden real ({type(error).__name__}: {error}). "
+                        "Las nuevas órdenes reales quedan bloqueadas hasta reiniciar el servicio y revisar Bitget."
+                    )
+                    print(mensaje)
+                    await _enviar_alerta_sfp(mensaje)
+
+        tareas = [
+            asyncio.create_task(actualizar_niveles()),
+            asyncio.create_task(vigilar_precio()),
+        ]
+        try:
+            await asyncio.gather(*tareas)
+        finally:
+            for tarea in tareas:
+                tarea.cancel()
+            await asyncio.gather(*tareas, return_exceptions=True)
+    finally:
+        await exchange.close()
+
+
+def motor_sfp():
+    try:
+        asyncio.run(_motor_sfp_async())
+    except Exception as error:
+        print(f"❌ Motor SFP detenido: {type(error).__name__}: {error}")
+
+
 def telegram_listener():
     global AUTO_SIGNAL_ENABLED, BINARIAS_ENABLED
     if not TOKEN_TELEGRAM:
@@ -1473,6 +1729,12 @@ if __name__ == '__main__':
     hilo_trading = threading.Thread(target=motor_de_trading)
     hilo_trading.daemon = True
     hilo_trading.start()
+
+    if SFP_ENABLED:
+        hilo_sfp = threading.Thread(target=motor_sfp, name="motor-sfp", daemon=True)
+        hilo_sfp.start()
+    else:
+        print("ℹ️ Motor SFP desactivado. Activa SFP_ENABLED=true para iniciarlo.")
 
     hilo_binarias = threading.Thread(target=motor_senales_binarias)
     hilo_binarias.daemon = True
