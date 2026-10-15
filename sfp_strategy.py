@@ -98,4 +98,3 @@ def calculate_exit_prices(
     if direction == "COMPRA":
         return entry_price * (1 - stop_move), entry_price * (1 + take_profit_move)
     return entry_price * (1 + stop_move), entry_price * (1 - take_profit_move)
-
