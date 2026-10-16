@@ -152,7 +152,7 @@ SFP_STOP_ROE_PERCENT = 20.0
 SFP_TAKE_PROFIT_ROE_PERCENT = 50.0
 SFP_SWEEP_DEVIATION = 0.0025
 SFP_COOLDOWN_SECONDS = 900
-SFP_HEDGED_MODE = os.getenv("SFP_HEDGED_MODE", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
+SFP_HEDGED_MODE = True
 
 
 @app.route('/stop')
@@ -1439,7 +1439,7 @@ async def _motor_sfp_async():
 
         print(
             f"📡 Motor SFP conectado a Bitget para {SFP_SYMBOL}. "
-            f"Órdenes reales: {'ON' if SFP_LIVE_TRADING else 'OFF'}."
+            f"Órdenes reales: {'ON' if SFP_LIVE_TRADING else 'OFF'}, modo de posición: HEDGE."
         )
         detector = SFPReclaimDetector()
         niveles = None
