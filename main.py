@@ -16,6 +16,7 @@ import anthropic
 from sfp_strategy import (
     SFPReclaimDetector,
     calculate_exit_prices,
+    is_sfp_trading_window_open,
     previous_day_levels,
 )
 
@@ -139,7 +140,7 @@ AUTO_SIGNAL_ENABLED = True
 AUTO_SIGNAL_COOLDOWN_SECONDS = int(os.getenv("AUTO_SIGNAL_COOLDOWN_SECONDS", "1800"))
 ULTIMA_SENAL_AUTOMATICA = None
 DETENER_BOT = threading.Event()
-BINARIAS_ENABLED = os.getenv("BINARIAS_ENABLED", "true").strip().lower() in {"1", "true", "on", "si", "sí"}
+BINARIAS_ENABLED = False
 SIMBOLO_BINARIAS = os.getenv("BINARIAS_SYMBOL", "BTC/USDT:USDT")
 
 # === ESTRATEGIA SFP (DESACTIVADA POR DEFECTO) ===
@@ -982,11 +983,9 @@ def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
 
 def construir_teclado_solicitud():
     estado_auto = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
-    estado_binarias = "ON" if BINARIAS_ENABLED else "OFF"
     return {"inline_keyboard": [
         [{"text": "BTC manual", "callback_data": "senal_btc"}],
         [{"text": f"Automáticas: {estado_auto}", "callback_data": "toggle_auto"}],
-        [{"text": f"Señales binarias: {estado_binarias}", "callback_data": "toggle_binarias"}],
     ]}
 
 
@@ -999,7 +998,7 @@ def enviar_boton_solicitud(chat_id=None):
         "Los miembros normales solo pueden solicitar 1 señal manual por día.\n"
         "La señal manual se asume bajo su propio riesgo y no tiene por qué coincidir con la estrategia principal del bot.\n\n"
         "Si el botón no responde, escribe /senalbtc en este chat para pedirla manualmente.\n"
-        "Los administradores pueden activar o pausar las señales automáticas y binarias desde los botones."
+        "Los administradores pueden activar o pausar las señales automáticas desde los botones."
     )
     enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=construir_teclado_solicitud())
 
@@ -1489,6 +1488,9 @@ async def _motor_sfp_async():
                 if not isfinite(precio) or precio <= 0:
                     print(f"⚠️ Bitget envió un precio SFP fuera de rango: {precio!r}")
                     continue
+                if not is_sfp_trading_window_open():
+                    detector.reset()
+                    continue
                 if time.monotonic() < cooldown_hasta:
                     detector.reset()
                     continue
@@ -1570,7 +1572,7 @@ def motor_sfp():
 
 
 def telegram_listener():
-    global AUTO_SIGNAL_ENABLED, BINARIAS_ENABLED
+    global AUTO_SIGNAL_ENABLED
     if not TOKEN_TELEGRAM:
         return
     offset = None
@@ -1607,19 +1609,14 @@ def telegram_listener():
                         answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                         requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
                         generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
-                    elif data in {"toggle_auto", "toggle_binarias"}:
+                    elif data == "toggle_auto":
                         if not es_admin_del_canal(user_id):
                             answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
                             requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Solo administradores pueden cambiar estos estados."}, timeout=10)
                         else:
-                            if data == "toggle_auto":
-                                AUTO_SIGNAL_ENABLED = not AUTO_SIGNAL_ENABLED
-                                estado = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
-                                detalle = f"Señales automáticas ahora {estado}."
-                            else:
-                                BINARIAS_ENABLED = not BINARIAS_ENABLED
-                                estado = "ON" if BINARIAS_ENABLED else "OFF"
-                                detalle = f"Señales binarias ahora {estado}."
+                            AUTO_SIGNAL_ENABLED = not AUTO_SIGNAL_ENABLED
+                            estado = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
+                            detalle = f"Señales automáticas ahora {estado}."
                             requests.post(
                                 f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery",
                                 json={"callback_query_id": callback.get("id"), "text": detalle},
@@ -1627,6 +1624,16 @@ def telegram_listener():
                             )
                             actualizar_teclado_callback(callback)
                             enviar_senal_telegram(f"⚙️ {detalle} (admin {user_id}).", chat_id=CHAT_ID_CANAL)
+                    elif data == "toggle_binarias":
+                        requests.post(
+                            f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery",
+                            json={
+                                "callback_query_id": callback.get("id"),
+                                "text": "Las señales binarias están desactivadas.",
+                            },
+                            timeout=10,
+                        )
+                        actualizar_teclado_callback(callback)
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
@@ -1634,7 +1641,7 @@ def telegram_listener():
 
 def motor_de_trading():
     print("🚀 Iniciando motor analítico duplicador de TradingView...")
-    print(f"📊 Señales binarias: {'ON' if BINARIAS_ENABLED else 'OFF'}.")
+    print("📊 Señales binarias desactivadas.")
     time.sleep(5)
 
     alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Algoritmo de sincronización activado. Escaneando el mercado en vivo clonando la estrategia de TradingView para compra y venta..."
@@ -1735,10 +1742,6 @@ if __name__ == '__main__':
         hilo_sfp.start()
     else:
         print("ℹ️ Motor SFP desactivado. Activa SFP_ENABLED=true para iniciarlo.")
-
-    hilo_binarias = threading.Thread(target=motor_senales_binarias)
-    hilo_binarias.daemon = True
-    hilo_binarias.start()
 
     hilo_listener = threading.Thread(target=telegram_listener)
     hilo_listener.daemon = True
