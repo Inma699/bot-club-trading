@@ -2,6 +2,20 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from math import isfinite
 from typing import Sequence
+from zoneinfo import ZoneInfo
+
+
+SPAIN_TIMEZONE = ZoneInfo("Europe/Madrid")
+
+
+def is_sfp_trading_window_open(now: datetime | None = None) -> bool:
+    now = now or datetime.now(SPAIN_TIMEZONE)
+    if now.tzinfo is None:
+        raise ValueError("La fecha/hora debe incluir zona horaria.")
+
+    spain_now = now.astimezone(SPAIN_TIMEZONE)
+    minutes_since_midnight = spain_now.hour * 60 + spain_now.minute
+    return 7 * 60 <= minutes_since_midnight < 22 * 60
 
 
 @dataclass(frozen=True)
