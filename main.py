@@ -91,6 +91,8 @@ ESTADISTICAS = {
 # Hora (Europe/Madrid, formato HH:MM) y control del parte diario automático de "la mente de Trump"
 PARTE_TRUMP_HORA = os.getenv("PARTE_TRUMP_HORA", "08:00").strip()
 ULTIMO_PARTE_TRUMP_ENVIADO = None
+ULTIMO_INTENTO_PARTE_TRUMP = 0.0
+PARTE_TRUMP_REINTENTO_SEGUNDOS = 300
 
 # === SEGUIMIENTO DE OPERACIONES ABIERTAS ===
 OPERACIONES_ABIERTAS = []
@@ -146,14 +148,25 @@ SIMBOLO_BINARIAS = os.getenv("BINARIAS_SYMBOL", "BTC/USDT:USDT")
 # === ESTRATEGIA SFP (DESACTIVADA POR DEFECTO) ===
 SFP_ENABLED = os.getenv("SFP_ENABLED", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
 SFP_LIVE_TRADING = os.getenv("SFP_LIVE_TRADING", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
-SFP_SYMBOL = "BTC/USDT:USDT"
-SFP_MARGIN_USDT = 2.0
-SFP_LEVERAGE = 70
-SFP_STOP_ROE_PERCENT = 65.0
-SFP_TAKE_PROFIT_ROE_PERCENT = 35.0
 SFP_SWEEP_DEVIATION = 0.0025
 SFP_COOLDOWN_SECONDS = 900
 SFP_HEDGED_MODE = True
+SFP_STRATEGIES = (
+    {
+        "symbol": "BTC/USDT:USDT",
+        "margin_usdt": 1.0,
+        "leverage": 70,
+        "stop_roe_percent": 60.0,
+        "take_profit_roe_percent": 35.0,
+    },
+    {
+        "symbol": "SPCX/USDT:USDT",
+        "margin_usdt": 1.0,
+        "leverage": 40,
+        "stop_roe_percent": 70.0,
+        "take_profit_roe_percent": 35.0,
+    },
+)
 
 
 @app.route('/stop')
@@ -694,7 +707,32 @@ def enviar_parte_diario_mente_trump(chat_id=None):
             "ℹ️ Generado por IA (Claude/Anthropic) a partir de titulares reales del día. "
             "Es una parodia analítica, NO declaraciones reales de Donald Trump ni asesoramiento financiero."
         )
-    enviar_senal_telegram(mensaje, chat_id=chat_id)
+    return enviar_senal_telegram(mensaje, chat_id=chat_id)
+
+
+def intentar_enviar_parte_diario_trump(hora_actual):
+    global ULTIMO_PARTE_TRUMP_ENVIADO, ULTIMO_INTENTO_PARTE_TRUMP
+
+    hoy = hora_actual.strftime("%Y-%m-%d")
+    if hora_actual.strftime("%H:%M") < PARTE_TRUMP_HORA:
+        return
+    if ULTIMO_PARTE_TRUMP_ENVIADO == hoy:
+        return
+
+    ahora = time.time()
+    if ahora - ULTIMO_INTENTO_PARTE_TRUMP < PARTE_TRUMP_REINTENTO_SEGUNDOS:
+        return
+    ULTIMO_INTENTO_PARTE_TRUMP = ahora
+
+    try:
+        resultado = enviar_parte_diario_mente_trump(chat_id=CHAT_ID_CANAL)
+        if isinstance(resultado, tuple) and resultado[0]:
+            ULTIMO_PARTE_TRUMP_ENVIADO = hoy
+            print(f"✅ Parte diario de 'la mente de Trump' enviado ({hoy}, hora de España).")
+        else:
+            print("⚠️ No se confirmó el envío del parte diario de Trump a Telegram; se reintentará.")
+    except Exception as error:
+        print(f"⚠️ No se pudo enviar el parte diario de 'la mente de Trump': {error}")
 
 
 def calcular_niveles_senal(direccion, precio, cierres, altos, bajos):
@@ -1336,34 +1374,35 @@ async def _enviar_alerta_sfp(mensaje):
     await loop.run_in_executor(None, enviar_senal_telegram, mensaje)
 
 
-async def _cargar_niveles_sfp(exchange):
-    velas = await exchange.fetch_ohlcv(SFP_SYMBOL, timeframe="1d", limit=3)
+async def _cargar_niveles_sfp(exchange, symbol):
+    velas = await exchange.fetch_ohlcv(symbol, timeframe="1d", limit=3)
     return previous_day_levels(velas, datetime.now(timezone.utc))
 
 
-async def _abrir_operacion_sfp(exchange, direccion, precio):
-    posiciones = await exchange.fetch_positions([SFP_SYMBOL])
+async def _abrir_operacion_sfp(exchange, estrategia, direccion, precio):
+    symbol = estrategia["symbol"]
+    posiciones = await exchange.fetch_positions([symbol])
     for posicion in posiciones:
-        if posicion.get("symbol") != SFP_SYMBOL:
+        if posicion.get("symbol") != symbol:
             continue
         contratos = posicion.get("contracts")
         if contratos is None:
             raise RuntimeError("Bitget devolvió una posición sin cantidad verificable; se cancela la entrada.")
         if abs(float(contratos)) > 0:
-            print("⏸️ SFP: ya existe una posición abierta en BTC/USDT:USDT; se omite esta entrada.")
+            print(f"⏸️ SFP: ya existe una posición abierta en {symbol}; se omite esta entrada.")
             return None
 
-    mercado = exchange.market(SFP_SYMBOL)
+    mercado = exchange.market(symbol)
     if not mercado.get("swap") or not mercado.get("linear") or mercado.get("inverse"):
-        raise RuntimeError(f"{SFP_SYMBOL} no está cargado como perpetuo lineal USDT-M.")
+        raise RuntimeError(f"{symbol} no está cargado como perpetuo lineal USDT-M.")
 
     tamano_contrato = float(mercado.get("contractSize") or 0)
     if tamano_contrato <= 0:
         raise RuntimeError("Bitget no informó un tamaño de contrato válido para calcular la orden.")
 
-    notional_maximo = SFP_MARGIN_USDT * SFP_LEVERAGE
+    notional_maximo = estrategia["margin_usdt"] * estrategia["leverage"]
     cantidad_sin_redondear = notional_maximo / (precio * tamano_contrato)
-    cantidad = float(exchange.amount_to_precision(SFP_SYMBOL, cantidad_sin_redondear))
+    cantidad = float(exchange.amount_to_precision(symbol, cantidad_sin_redondear))
     notional = cantidad * tamano_contrato * precio
     cantidad_minima = mercado.get("limits", {}).get("amount", {}).get("min")
     if cantidad <= 0 or (cantidad_minima is not None and cantidad < float(cantidad_minima)):
@@ -1374,28 +1413,28 @@ async def _abrir_operacion_sfp(exchange, direccion, precio):
     stop_loss, take_profit = calculate_exit_prices(
         direccion,
         precio,
-        SFP_LEVERAGE,
-        SFP_STOP_ROE_PERCENT,
-        SFP_TAKE_PROFIT_ROE_PERCENT,
+        estrategia["leverage"],
+        estrategia["stop_roe_percent"],
+        estrategia["take_profit_roe_percent"],
     )
     lado = "buy" if direccion == "COMPRA" else "sell"
-    await exchange.set_margin_mode("isolated", SFP_SYMBOL)
-    await exchange.set_leverage(SFP_LEVERAGE, SFP_SYMBOL)
+    await exchange.set_margin_mode("isolated", symbol)
+    await exchange.set_leverage(estrategia["leverage"], symbol)
     parametros = {
         "marginMode": "isolated",
         "hedged": SFP_HEDGED_MODE,
         "clientOrderId": f"SFP-{int(time.time() * 1000)}",
         "stopLoss": {
-            "triggerPrice": exchange.price_to_precision(SFP_SYMBOL, stop_loss),
+            "triggerPrice": exchange.price_to_precision(symbol, stop_loss),
             "type": "mark_price",
         },
         "takeProfit": {
-            "triggerPrice": exchange.price_to_precision(SFP_SYMBOL, take_profit),
+            "triggerPrice": exchange.price_to_precision(symbol, take_profit),
             "type": "mark_price",
         },
     }
     orden = await exchange.create_order(
-        SFP_SYMBOL,
+        symbol,
         "market",
         lado,
         cantidad,
@@ -1427,83 +1466,110 @@ async def _motor_sfp_async():
     })
     try:
         await exchange.load_markets()
-        mercado = exchange.market(SFP_SYMBOL)
-        if not mercado.get("swap") or not mercado.get("linear") or mercado.get("inverse"):
-            raise RuntimeError(f"Bitget no ofrece {SFP_SYMBOL} como perpetuo lineal.")
-        apalancamiento_maximo = mercado.get("limits", {}).get("leverage", {}).get("max")
-        if apalancamiento_maximo is not None and SFP_LEVERAGE > float(apalancamiento_maximo):
-            raise RuntimeError(
-                f"Bitget limita el apalancamiento de {SFP_SYMBOL} a {apalancamiento_maximo}x."
-            )
+        estrategias_activas = []
+        for estrategia in SFP_STRATEGIES:
+            symbol = estrategia["symbol"]
+            try:
+                mercado = exchange.market(symbol)
+            except (ccxt.BaseError, KeyError) as error:
+                print(f"⚠️ SFP: se omite {symbol}; Bitget no lo cargó como mercado: {error}")
+                continue
+            if not mercado.get("swap") or not mercado.get("linear") or mercado.get("inverse"):
+                print(f"⚠️ SFP: se omite {symbol}; no es un perpetuo lineal USDT-M.")
+                continue
+            apalancamiento_maximo = mercado.get("limits", {}).get("leverage", {}).get("max")
+            if (
+                apalancamiento_maximo is not None
+                and estrategia["leverage"] > float(apalancamiento_maximo)
+            ):
+                print(
+                    f"⚠️ SFP: se omite {symbol}; Bitget limita el apalancamiento "
+                    f"a {apalancamiento_maximo}x."
+                )
+                continue
+            estrategias_activas.append(estrategia)
+
+        if not estrategias_activas:
+            raise RuntimeError("Bitget no cargó ningún mercado SFP perpetuo lineal compatible.")
 
         print(
-            f"📡 Motor SFP conectado a Bitget para {SFP_SYMBOL}. "
+            "📡 Motor SFP conectado a Bitget para "
+            f"{', '.join(estrategia['symbol'] for estrategia in estrategias_activas)}. "
             f"Órdenes reales: {'ON' if SFP_LIVE_TRADING else 'OFF'}, modo de posición: HEDGE."
         )
-        detector = SFPReclaimDetector()
-        niveles = None
-        cooldown_hasta = 0.0
-        ordenes_reales_bloqueadas = False
+        estados = {
+            estrategia["symbol"]: {
+                "detector": SFPReclaimDetector(),
+                "niveles": None,
+                "cooldown_hasta": 0.0,
+                "ordenes_reales_bloqueadas": False,
+            }
+            for estrategia in estrategias_activas
+        }
 
-        async def actualizar_niveles():
-            nonlocal niveles
+        async def actualizar_niveles(estrategia, estado):
             while not DETENER_BOT.is_set():
                 fecha_utc = datetime.now(timezone.utc).date()
+                niveles = estado["niveles"]
                 if niveles is None or niveles.day != fecha_utc:
                     try:
-                        nuevos_niveles = await _cargar_niveles_sfp(exchange)
-                        niveles = nuevos_niveles
-                        detector.reset()
+                        nuevos_niveles = await _cargar_niveles_sfp(exchange, estrategia["symbol"])
+                        estado["niveles"] = nuevos_niveles
+                        estado["detector"].reset()
                         print(
-                            f"📊 Niveles SFP UTC {niveles.day}: "
-                            f"PDH={niveles.high:.2f}, PDL={niveles.low:.2f}"
+                            f"📊 Niveles SFP {estrategia['symbol']} UTC {nuevos_niveles.day}: "
+                            f"PDH={nuevos_niveles.high:.2f}, PDL={nuevos_niveles.low:.2f}"
                         )
                     except (ccxt.BaseError, ValueError) as error:
-                        print(f"⚠️ No se pudieron actualizar PDH/PDL de Bitget: {error}")
+                        print(
+                            f"⚠️ No se pudieron actualizar PDH/PDL de "
+                            f"{estrategia['symbol']} en Bitget: {error}"
+                        )
                         await asyncio.sleep(30)
                         continue
                 await asyncio.sleep(60)
 
-        async def vigilar_precio():
-            nonlocal cooldown_hasta, ordenes_reales_bloqueadas
+        async def vigilar_precio(estrategia, estado):
+            symbol = estrategia["symbol"]
             while not DETENER_BOT.is_set():
                 try:
-                    ticker = await exchange.watch_ticker(SFP_SYMBOL)
+                    ticker = await exchange.watch_ticker(symbol)
                 except ccxt.BaseError as error:
-                    print(f"⚠️ WebSocket SFP de Bitget: {type(error).__name__}: {error}")
+                    print(f"⚠️ WebSocket SFP de Bitget ({symbol}): {type(error).__name__}: {error}")
                     await asyncio.sleep(3)
                     continue
 
+                niveles = estado["niveles"]
                 if niveles is None:
                     continue
                 precio = ticker.get("last") or ticker.get("close")
                 if precio is None:
-                    print("⚠️ Bitget envió un ticker SFP sin precio last/close.")
+                    print(f"⚠️ Bitget envió un ticker SFP sin precio last/close para {symbol}.")
                     continue
                 try:
                     precio = float(precio)
                 except (TypeError, ValueError):
-                    print(f"⚠️ Bitget envió un precio SFP inválido: {precio!r}")
+                    print(f"⚠️ Bitget envió un precio SFP inválido para {symbol}: {precio!r}")
                     continue
                 if not isfinite(precio) or precio <= 0:
-                    print(f"⚠️ Bitget envió un precio SFP fuera de rango: {precio!r}")
+                    print(f"⚠️ Bitget envió un precio SFP fuera de rango para {symbol}: {precio!r}")
                     continue
                 if not is_sfp_trading_window_open():
-                    detector.reset()
+                    estado["detector"].reset()
                     continue
-                if time.monotonic() < cooldown_hasta:
-                    detector.reset()
+                if time.monotonic() < estado["cooldown_hasta"]:
+                    estado["detector"].reset()
                     continue
 
-                direccion = detector.update(precio, niveles, SFP_SWEEP_DEVIATION)
+                direccion = estado["detector"].update(precio, niveles, SFP_SWEEP_DEVIATION)
                 if direccion is None:
                     continue
 
-                detector.reset()
+                estado["detector"].reset()
                 if not SFP_LIVE_TRADING:
-                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                     mensaje = (
-                        f"🔔 SFP {direccion} | {SFP_SYMBOL}\n"
+                        f"🔔 SFP {direccion} | {symbol}\n"
                         f"Nivel barrido y recuperado: {niveles.low if direccion == 'COMPRA' else niveles.high:,.2f}\n"
                         f"Precio: {precio:,.2f}\n"
                         "Modo señales; no se envió ninguna orden."
@@ -1512,17 +1578,20 @@ async def _motor_sfp_async():
                     await _enviar_alerta_sfp(mensaje)
                     continue
 
-                if ordenes_reales_bloqueadas:
-                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
-                    print("⛔ SFP: órdenes reales bloqueadas tras un error anterior; reinicia el servicio tras revisar Bitget.")
+                if estado["ordenes_reales_bloqueadas"]:
+                    estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    print(
+                        f"⛔ SFP {symbol}: órdenes reales bloqueadas tras un error anterior; "
+                        "reinicia el servicio tras revisar Bitget."
+                    )
                     continue
                 try:
-                    resultado = await _abrir_operacion_sfp(exchange, direccion, precio)
+                    resultado = await _abrir_operacion_sfp(exchange, estrategia, direccion, precio)
                     if resultado is None:
-                        cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                        estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                         continue
                     orden, stop_loss, take_profit, notional = resultado
-                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                     precio_entrada = orden.get("average") or orden.get("price") or precio
                     origen_entrada = (
                         "ejecución reportada por Bitget"
@@ -1531,29 +1600,38 @@ async def _motor_sfp_async():
                     )
                     mensaje = (
                         "🦈 SEÑAL: OPERA COMO LOS PECES GORDOS INSTITUCIONALES\n"
-                        f"✅ Orden SFP {direccion} enviada | {SFP_SYMBOL}\n"
+                        f"✅ Orden SFP {direccion} enviada | {symbol}\n"
                         f"📍 Entrada ({origen_entrada}): {float(precio_entrada):,.2f}\n"
                         f"🎯 Take Profit: {take_profit:,.2f}\n"
                         f"🛑 Stop Loss: {stop_loss:,.2f}\n"
                         f"ID Bitget: {orden['id']} | Nominal aprox.: {notional:,.2f} USDT\n"
-                        f"Margen aislado: {SFP_MARGIN_USDT:.2f} USDT | Apalancamiento: {SFP_LEVERAGE}x"
+                        f"Margen aislado: {estrategia['margin_usdt']:.2f} USDT | "
+                        f"Apalancamiento: {estrategia['leverage']}x | "
+                        f"SL/TP: {estrategia['stop_roe_percent']:.0f}%/"
+                        f"{estrategia['take_profit_roe_percent']:.0f}% RoE"
                     )
                     print(mensaje)
                     await _enviar_alerta_sfp(mensaje)
                 except (ccxt.BaseError, RuntimeError, ValueError, TypeError) as error:
-                    ordenes_reales_bloqueadas = True
-                    cooldown_hasta = time.monotonic() + SFP_COOLDOWN_SECONDS
+                    estado["ordenes_reales_bloqueadas"] = True
+                    estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                     mensaje = (
-                        f"🚨 SFP: error al enviar/verificar la orden real ({type(error).__name__}: {error}). "
-                        "Las nuevas órdenes reales quedan bloqueadas hasta reiniciar el servicio y revisar Bitget."
+                        f"🚨 SFP {symbol}: error al enviar/verificar la orden real "
+                        f"({type(error).__name__}: {error}). Las nuevas órdenes de este símbolo "
+                        "quedan bloqueadas hasta reiniciar el servicio y revisar Bitget."
                     )
                     print(mensaje)
                     await _enviar_alerta_sfp(mensaje)
 
-        tareas = [
-            asyncio.create_task(actualizar_niveles()),
-            asyncio.create_task(vigilar_precio()),
-        ]
+        tareas = []
+        for estrategia in estrategias_activas:
+            estado = estados[estrategia["symbol"]]
+            tareas.extend(
+                (
+                    asyncio.create_task(actualizar_niveles(estrategia, estado)),
+                    asyncio.create_task(vigilar_precio(estrategia, estado)),
+                )
+            )
         try:
             await asyncio.gather(*tareas)
         finally:
@@ -1640,6 +1718,7 @@ def telegram_listener():
 
 
 def motor_de_trading():
+    global ULTIMO_PARTE_TRUMP_ENVIADO
     print("🚀 Iniciando motor analítico duplicador de TradingView...")
     print("📊 Señales binarias desactivadas.")
     time.sleep(5)
@@ -1657,6 +1736,7 @@ def motor_de_trading():
             resetear_estado_diario_si_es_necesario()
             limpiar_solicitudes_si_es_necesario()
             hora_actual = hora_espana()
+            intentar_enviar_parte_diario_trump(hora_actual)
             senal_enviada = False
 
             for mercado in CONFIGURACIONES_MERCADO:
@@ -1716,15 +1796,6 @@ def motor_de_trading():
 
             if time.strftime("%H:%M") == "00:00" and ESTADISTICAS["ultimo_resumen"] != time.strftime("%Y-%m-%d"):
                 enviar_resumen_diario()
-
-            global ULTIMO_PARTE_TRUMP_ENVIADO
-            hoy_str = hora_actual.strftime("%Y-%m-%d")
-            if hora_actual.strftime("%H:%M") == PARTE_TRUMP_HORA and ULTIMO_PARTE_TRUMP_ENVIADO != hoy_str:
-                try:
-                    enviar_parte_diario_mente_trump(chat_id=CHAT_ID_CANAL)
-                    ULTIMO_PARTE_TRUMP_ENVIADO = hoy_str
-                except Exception as error:
-                    print(f"⚠️ No se pudo enviar el parte diario de 'la mente de Trump': {error}")
 
             time.sleep(60)
         except Exception as e:
