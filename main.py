@@ -157,14 +157,15 @@ SFP_STRATEGIES = (
         "margin_usdt": 1.0,
         "leverage": 70,
         "stop_roe_percent": 60.0,
-        "take_profit_roe_percent": 35.0,
+        "take_profit_roe_percent": 45.0,
     },
     {
         "symbol": "SPCX/USDT:USDT",
         "margin_usdt": 1.0,
         "leverage": 40,
         "stop_roe_percent": 70.0,
-        "take_profit_roe_percent": 35.0,
+        "take_profit_roe_percent": 40.0,
+        "short_only": True,
     },
 )
 
@@ -1381,6 +1382,9 @@ async def _cargar_niveles_sfp(exchange, symbol):
 
 async def _abrir_operacion_sfp(exchange, estrategia, direccion, precio):
     symbol = estrategia["symbol"]
+    if estrategia.get("short_only") and direccion != "VENTA":
+        raise ValueError(f"La estrategia SFP de {symbol} solo permite abrir ventas.")
+
     posiciones = await exchange.fetch_positions([symbol])
     for posicion in posiciones:
         if posicion.get("symbol") != symbol:
@@ -1566,6 +1570,10 @@ async def _motor_sfp_async():
                     continue
 
                 estado["detector"].reset()
+                if estrategia.get("short_only") and direccion != "VENTA":
+                    print(f"⏭️ SFP {symbol}: señal COMPRA descartada; este símbolo solo opera ventas.")
+                    continue
+
                 if not SFP_LIVE_TRADING:
                     estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                     mensaje = (
