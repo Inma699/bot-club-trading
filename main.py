@@ -69,9 +69,8 @@ if ANTHROPIC_API_KEY:
 else:
     print("ℹ️ ANTHROPIC_API_KEY no configurada. El análisis macro 'estilo Trump' quedará desactivado.")
 
-# Caché del análisis macro diario para no disparar llamadas a Claude en cada señal.
-CACHE_ANALISIS_TRUMP = {"fecha_hora": None, "texto": None}
-ANALISIS_TRUMP_TTL_SEGUNDOS = int(os.getenv("ANALISIS_TRUMP_TTL_SEGUNDOS", "3600"))
+# Se guarda también el intento fallido para no volver a consultar Claude más de una vez al día.
+CACHE_ANALISIS_TRUMP = {"fecha": None, "texto": None, "intento_realizado": False}
 
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
@@ -154,17 +153,17 @@ SFP_HEDGED_MODE = True
 SFP_STRATEGIES = (
     {
         "symbol": "BTC/USDT:USDT",
-        "margin_usdt": 1.0,
+        "margin_usdt": 2.0,
         "leverage": 70,
-        "stop_roe_percent": 60.0,
+        "stop_roe_percent": 40.0,
         "take_profit_roe_percent": 35.0,
     },
     {
         "symbol": "SPCX/USDT:USDT",
-        "margin_usdt": 1.0,
+        "margin_usdt": 2.0,
         "leverage": 40,
-        "stop_roe_percent": 70.0,
-        "take_profit_roe_percent": 35.0,
+        "stop_roe_percent": 60.0,
+        "take_profit_roe_percent": 40.0,
         "short_only": True,
     },
 )
@@ -251,7 +250,7 @@ def recopilar_noticias_macro_diarias():
     return bloque_noticias
 
 
-def generar_analisis_trump_ia(forzar=False):
+def generar_analisis_trump_ia():
     """
     Usa la API oficial de Anthropic (Claude) para generar un análisis de sentimiento
     macro de mercado, narrado con la personalidad retórica de Donald Trump, a partir
@@ -265,13 +264,15 @@ def generar_analisis_trump_ia(forzar=False):
     if not ANALISIS_TRUMP_ENABLED or _cliente_anthropic is None:
         return None
 
-    ahora = time.time()
-    cache_valida = (
-        CACHE_ANALISIS_TRUMP["fecha_hora"] is not None
-        and (ahora - CACHE_ANALISIS_TRUMP["fecha_hora"]) < ANALISIS_TRUMP_TTL_SEGUNDOS
-    )
-    if cache_valida and not forzar:
+    hoy = hora_espana().date().isoformat()
+    if CACHE_ANALISIS_TRUMP["fecha"] == hoy and CACHE_ANALISIS_TRUMP["intento_realizado"]:
         return CACHE_ANALISIS_TRUMP["texto"]
+
+    CACHE_ANALISIS_TRUMP = {
+        "fecha": hoy,
+        "texto": None,
+        "intento_realizado": True,
+    }
 
     noticias = recopilar_noticias_macro_diarias()
     resumen_noticias = []
@@ -305,7 +306,6 @@ def generar_analisis_trump_ia(forzar=False):
             bloque.text for bloque in respuesta.content if getattr(bloque, "type", None) == "text"
         ).strip()
         if texto:
-            CACHE_ANALISIS_TRUMP["fecha_hora"] = ahora
             CACHE_ANALISIS_TRUMP["texto"] = texto
             return texto
     except Exception as error:
@@ -671,8 +671,6 @@ def enviar_resumen_diario():
     global ESTADISTICAS
     hoy = time.strftime("%Y-%m-%d")
     ratio = round((ESTADISTICAS['ganadas'] / max(ESTADISTICAS['total_senales'], 1)) * 100, 1)
-    analisis_trump = generar_analisis_trump_ia(forzar=True)
-    macro_texto = f"\n\n🗣️ *Lectura macro del día (estilo Trump, vía IA):*\n{analisis_trump}" if analisis_trump else ""
     resumen = (
         f"📊 *RESUMEN DIARIO CLUB MARKETSHARKS*\n\n"
         f"📅 Fecha: {hoy}\n"
@@ -682,7 +680,6 @@ def enviar_resumen_diario():
         f"✅ Ganadas: {ESTADISTICAS['ganadas']}\n"
         f"❌ Perdidas: {ESTADISTICAS['perdidas']}\n"
         f"📈 Ratio: {ratio}%"
-        f"{macro_texto}"
     )
     enviar_senal_telegram(resumen)
     ESTADISTICAS["ultimo_resumen"] = hoy
@@ -694,7 +691,7 @@ def enviar_parte_diario_mente_trump(chat_id=None):
     por Claude (Anthropic) a partir de noticias reales del día sobre Trump, Bitcoin y la Fed,
     incluyendo su opinión sobre qué día de la semana podría moverse BTC con fuerza.
     """
-    analisis_trump = generar_analisis_trump_ia(forzar=True)
+    analisis_trump = generar_analisis_trump_ia()
     if not analisis_trump:
         mensaje = (
             "🧠 *LA MENTE DE TRUMP SOBRE BTC*\n\n"
@@ -797,9 +794,6 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
     else:
         direccion_texto = "🔴 *Dirección:* VENTA"
 
-    analisis_trump = generar_analisis_trump_ia()
-    macro_texto = f"\n\n🗣️ *Lectura macro (estilo Trump, vía IA):*\n{analisis_trump}" if analisis_trump else ""
-
     return (
         f"{prefijo}\n\n"
         f"{tipo_texto}\n"
@@ -815,7 +809,6 @@ def construir_mensaje_senal(mercado, direccion, precio_actual, stop_loss, take_p
         f"⚙️ *Apalancamiento recomendado:* 75x\n\n"
         f"📈 *EMA 200:* $ {ema_200:,.2f} USD\n"
         f"⚡ *Fuerza movimiento:* {fuerza:.2f}% | *Contexto:* {motivo}{flujo_texto}{liquidacion_texto}"
-        f"{macro_texto}"
     )
 
 
