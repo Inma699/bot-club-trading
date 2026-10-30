@@ -172,7 +172,7 @@ SFP_STRATEGIES = (
         "margin_usdt": 2.0,
         "leverage": 40,
         "stop_roe_percent": 65.0,
-        "take_profit_roe_percent": 35.0,
+        "take_profit_roe_percent": 36.0,
         "short_only": True,
     },
 )
