@@ -164,15 +164,15 @@ SFP_STRATEGIES = (
         "symbol": "BTC/USDT:USDT",
         "margin_usdt": 2.0,
         "leverage": 70,
-        "stop_roe_percent": 45.0,
+        "stop_roe_percent": 65.0,
         "take_profit_roe_percent": 35.0,
     },
     {
         "symbol": "SPCX/USDT:USDT",
         "margin_usdt": 2.0,
         "leverage": 40,
-        "stop_roe_percent": 60.0,
-        "take_profit_roe_percent": 40.0,
+        "stop_roe_percent": 65.0,
+        "take_profit_roe_percent": 35.0,
         "short_only": True,
     },
 )
