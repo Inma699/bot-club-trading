@@ -14,10 +14,15 @@ from zoneinfo import ZoneInfo
 from flask import Flask
 import anthropic
 from sfp_strategy import (
+    BTC_STALLED_TRADE_ALERT_AFTER_SECONDS,
+    BTC_STALLED_TRADE_ALERT_TARGET_ROE,
     SFPReclaimDetector,
+    calculate_roe_percent,
     calculate_exit_prices,
+    detect_strong_support_break,
     is_sfp_trading_window_open,
     previous_day_levels,
+    should_alert_stalled_btc_trade,
 )
 
 app = Flask(__name__)
@@ -88,7 +93,7 @@ ESTADISTICAS = {
 }
 
 # Hora (Europe/Madrid, formato HH:MM) y control del parte diario automático de "la mente de Trump"
-PARTE_TRUMP_HORA = os.getenv("PARTE_TRUMP_HORA", "08:00").strip()
+PARTE_TRUMP_HORA = os.getenv("PARTE_TRUMP_HORA", "13:00").strip()
 ULTIMO_PARTE_TRUMP_ENVIADO = None
 ULTIMO_INTENTO_PARTE_TRUMP = 0.0
 PARTE_TRUMP_REINTENTO_SEGUNDOS = 300
@@ -143,19 +148,23 @@ ULTIMA_SENAL_AUTOMATICA = None
 DETENER_BOT = threading.Event()
 BINARIAS_ENABLED = False
 SIMBOLO_BINARIAS = os.getenv("BINARIAS_SYMBOL", "BTC/USDT:USDT")
+LEGACY_SIGNALS_ENABLED = False
 
 # === ESTRATEGIA SFP (DESACTIVADA POR DEFECTO) ===
 SFP_ENABLED = os.getenv("SFP_ENABLED", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
 SFP_LIVE_TRADING = os.getenv("SFP_LIVE_TRADING", "false").strip().lower() in {"1", "true", "on", "si", "sí"}
 SFP_SWEEP_DEVIATION = 0.0025
 SFP_COOLDOWN_SECONDS = 900
+SFP_POSITION_POLL_SECONDS = 15
+SFP_BREAKOUT_CHECK_SECONDS = 30
+SFP_RESULT_RETRY_SECONDS = 60
 SFP_HEDGED_MODE = True
 SFP_STRATEGIES = (
     {
         "symbol": "BTC/USDT:USDT",
         "margin_usdt": 2.0,
         "leverage": 70,
-        "stop_roe_percent": 40.0,
+        "stop_roe_percent": 45.0,
         "take_profit_roe_percent": 35.0,
     },
     {
@@ -641,7 +650,7 @@ def actualizar_operaciones_abiertas(cierres, datos, mercado):
         enviar_senal_telegram(mensaje_cierre)
 
 
-def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
+def enviar_senal_telegram(mensaje, chat_id=None):
     target_chat = chat_id or CHAT_ID_CANAL
     if not TOKEN_TELEGRAM or not target_chat:
         print("⚠️ Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Render")
@@ -650,8 +659,6 @@ def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
     # Enviar como texto plano para evitar errores de parseo de entidades
     payload = {"chat_id": target_chat, "text": mensaje}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
     try:
         print(f"➡️ Enviando mensaje a Telegram chat={target_chat} payload_len={len(mensaje)}")
         response = requests.post(url, json=payload, timeout=10)
@@ -1013,47 +1020,17 @@ def enviar_senal_y_registrar(senal, chat_id=None, tipo="auto"):
     registrar_senal_emitida(senal["mercado"], senal["direccion"], senal["precio_actual"], senal["stop_loss"], senal["take_profit"], senal["apalancamiento"], tipo=tipo)
 
 
-def construir_teclado_solicitud():
-    estado_auto = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
-    return {"inline_keyboard": [
-        [{"text": "BTC manual", "callback_data": "senal_btc"}],
-        [{"text": f"Automáticas: {estado_auto}", "callback_data": "toggle_auto"}],
-    ]}
-
-
-def enviar_boton_solicitud(chat_id=None):
-    mensaje = (
-        "🦈 *CLUB MARKETSHARKS*\n\n"
-        "Elija el mercado para solicitar una señal manual instantánea.\n\n"
-        "⚠️ Aviso importante: esta señal manual NO sustituye la estrategia principal del canal.\n"
-        "Los administradores del canal pueden pedir más de 1 señal manual al día.\n"
-        "Los miembros normales solo pueden solicitar 1 señal manual por día.\n"
-        "La señal manual se asume bajo su propio riesgo y no tiene por qué coincidir con la estrategia principal del bot.\n\n"
-        "Si el botón no responde, escribe /senalbtc en este chat para pedirla manualmente.\n"
-        "Los administradores pueden activar o pausar las señales automáticas desde los botones."
-    )
-    enviar_senal_telegram(mensaje, chat_id=chat_id, reply_markup=construir_teclado_solicitud())
-
-
-def actualizar_teclado_callback(callback):
-    mensaje = callback.get("message", {})
-    chat_id = mensaje.get("chat", {}).get("id")
-    message_id = mensaje.get("message_id")
-    if not chat_id or not message_id:
-        return
-    requests.post(
-        f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/editMessageReplyMarkup",
-        json={
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "reply_markup": construir_teclado_solicitud(),
-        },
-        timeout=10,
-    )
-
-
 def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=None):
     global SOLICITUDES_MANUALES
+    if not LEGACY_SIGNALS_ENABLED:
+        if chat_id:
+            enviar_senal_telegram(
+                "ℹ️ Las señales manuales anteriores están desactivadas. "
+                "El bot solo publica las operaciones de la estrategia SFP de Bitget.",
+                chat_id=chat_id,
+            )
+        return False
+
     limpiar_solicitudes_si_es_necesario()
     if not chat_id:
         return False
@@ -1365,7 +1342,90 @@ def motor_senales_binarias():
 
 async def _enviar_alerta_sfp(mensaje):
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, enviar_senal_telegram, mensaje)
+    return await loop.run_in_executor(None, enviar_senal_telegram, mensaje)
+
+
+def _extraer_pnl_cierre_sfp(trades, direccion, opened_at_ms):
+    lado_cierre = "sell" if direccion == "COMPRA" else "buy"
+    pnl_total = 0.0
+    operaciones_cierre = 0
+
+    for trade in trades:
+        info = trade.get("info") or {}
+        if str(info.get("tradeSide", "")).lower() != "close":
+            continue
+        if str(trade.get("side", "")).lower() != lado_cierre:
+            continue
+        timestamp = trade.get("timestamp")
+        if timestamp is None:
+            timestamp = info.get("cTime") or info.get("createdTime")
+        try:
+            if timestamp is None or int(timestamp) < opened_at_ms:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        pnl = next(
+            (
+                info[key]
+                for key in ("profit", "execPnl", "realizedPnl")
+                if info.get(key) is not None
+            ),
+            None,
+        )
+        if pnl is None:
+            continue
+        try:
+            pnl_total += float(pnl)
+        except (TypeError, ValueError):
+            continue
+        operaciones_cierre += 1
+
+    if operaciones_cierre == 0:
+        return None
+    return pnl_total, operaciones_cierre
+
+
+def _posicion_sfp_abierta(posiciones, symbol):
+    for posicion in posiciones:
+        if posicion.get("symbol") != symbol:
+            continue
+        contratos = posicion.get("contracts")
+        if contratos is None:
+            raise RuntimeError(f"Bitget devolvió una posición de {symbol} sin cantidad verificable.")
+        if abs(float(contratos)) > 0:
+            return True
+    return False
+
+
+def _precio_marca_posicion_sfp(posiciones, symbol):
+    for posicion in posiciones:
+        if posicion.get("symbol") != symbol:
+            continue
+        contratos = posicion.get("contracts")
+        if contratos is None:
+            raise RuntimeError(f"Bitget devolvió una posición de {symbol} sin cantidad verificable.")
+        if abs(float(contratos)) <= 0:
+            continue
+
+        info = posicion.get("info") or {}
+        for precio in (
+            posicion.get("markPrice"),
+            posicion.get("lastPrice"),
+            info.get("markPrice"),
+            info.get("mark_price"),
+            info.get("markPr"),
+        ):
+            if precio is None:
+                continue
+            try:
+                precio = float(precio)
+            except (TypeError, ValueError):
+                continue
+            if isfinite(precio) and precio > 0:
+                return precio
+        return None
+    return None
 
 
 async def _cargar_niveles_sfp(exchange, symbol):
@@ -1500,6 +1560,7 @@ async def _motor_sfp_async():
                 "niveles": None,
                 "cooldown_hasta": 0.0,
                 "ordenes_reales_bloqueadas": False,
+                "operacion_abierta": None,
             }
             for estrategia in estrategias_activas
         }
@@ -1579,6 +1640,13 @@ async def _motor_sfp_async():
                     await _enviar_alerta_sfp(mensaje)
                     continue
 
+                if estado["operacion_abierta"] is not None:
+                    print(
+                        f"⏸️ SFP {symbol}: hay una operación anterior pendiente de confirmar "
+                        "su resultado; se omite esta señal."
+                    )
+                    continue
+
                 if estado["ordenes_reales_bloqueadas"]:
                     estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                     print(
@@ -1587,11 +1655,33 @@ async def _motor_sfp_async():
                     )
                     continue
                 try:
+                    opened_at_ms = int(time.time() * 1000)
                     resultado = await _abrir_operacion_sfp(exchange, estrategia, direccion, precio)
                     if resultado is None:
                         estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                         continue
                     orden, stop_loss, take_profit, notional = resultado
+                    estado["operacion_abierta"] = {
+                        "order_id": orden["id"],
+                        "direccion": direccion,
+                        "opened_at_ms": opened_at_ms,
+                        "entrada": float(orden.get("average") or orden.get("price") or precio),
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "notional": notional,
+                        "open_seen": bool(float(orden.get("filled") or 0) > 0)
+                        or str(orden.get("status", "")).lower() in {"closed", "filled"},
+                        "pnl_cierre": None,
+                        "cierres_pnl": 0,
+                        "ultimo_intento_resultado": 0.0,
+                        "breakout_check_at": 0.0,
+                        "breakout_alerts_sent": set(),
+                        "stall_check_at": 0.0,
+                        "max_roe_observed": None,
+                        "stall_alert_sent": False,
+                        "stall_alert_retry_at": 0.0,
+                        "last_stall_data_warning_at": 0.0,
+                    }
                     estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                     precio_entrada = orden.get("average") or orden.get("price") or precio
                     origen_entrada = (
@@ -1624,6 +1714,216 @@ async def _motor_sfp_async():
                     print(mensaje)
                     await _enviar_alerta_sfp(mensaje)
 
+        async def vigilar_cierre(estrategia, estado):
+            symbol = estrategia["symbol"]
+            while not DETENER_BOT.is_set():
+                operacion = estado["operacion_abierta"]
+                if operacion is None:
+                    await asyncio.sleep(SFP_POSITION_POLL_SECONDS)
+                    continue
+
+                try:
+                    posiciones = await exchange.fetch_positions([symbol])
+                    posicion_abierta = _posicion_sfp_abierta(posiciones, symbol)
+                    if posicion_abierta:
+                        operacion["open_seen"] = True
+                        if (
+                            symbol == "BTC/USDT:USDT"
+                            and time.monotonic() >= operacion["stall_check_at"]
+                        ):
+                            operacion["stall_check_at"] = (
+                                time.monotonic() + SFP_POSITION_POLL_SECONDS
+                            )
+                            try:
+                                precio_actual = _precio_marca_posicion_sfp(posiciones, symbol)
+                                if precio_actual is None:
+                                    ticker = await exchange.fetch_ticker(symbol)
+                                    precio_actual = ticker.get("last") or ticker.get("close")
+                                if precio_actual is None:
+                                    raise RuntimeError(
+                                        "Bitget no devolvió un precio de marca/mercado válido."
+                                    )
+
+                                roe_actual = calculate_roe_percent(
+                                    operacion["direccion"],
+                                    operacion["entrada"],
+                                    float(precio_actual),
+                                    estrategia["leverage"],
+                                )
+                                max_roe = operacion["max_roe_observed"]
+                                operacion["max_roe_observed"] = (
+                                    roe_actual if max_roe is None else max(max_roe, roe_actual)
+                                )
+                                if (
+                                    should_alert_stalled_btc_trade(
+                                        (int(time.time() * 1000) - operacion["opened_at_ms"]) / 1000,
+                                        operacion["max_roe_observed"],
+                                    )
+                                    and not operacion["stall_alert_sent"]
+                                    and time.monotonic() >= operacion["stall_alert_retry_at"]
+                                ):
+                                    horas_abierta = (
+                                        int(time.time() * 1000) - operacion["opened_at_ms"]
+                                    ) / 3_600_000
+                                    mensaje = (
+                                        "⏳ AVISO SFP BTC: OPERACIÓN ABIERTA MÁS DE 4 HORAS\n"
+                                        f"Dirección: {operacion['direccion']}\n"
+                                        f"RoE actual aproximado: {roe_actual:+.1f}% | "
+                                        f"máximo observado: "
+                                        f"{operacion['max_roe_observed']:+.1f}%\n"
+                                        f"Han pasado {horas_abierta:.1f} horas y la operación "
+                                        f"no ha alcanzado +{BTC_STALLED_TRADE_ALERT_TARGET_ROE:.0f}% "
+                                        "RoE. La falta de avance a favor de la señal puede advertir "
+                                        "de pérdida de impulso o de un posible cambio de tendencia "
+                                        "en contra.\n"
+                                        "Valora vigilarla y gestionar el riesgo. Este aviso es "
+                                        "informativo: el bot no cerrará ni modificará la operación."
+                                    )
+                                    print(mensaje)
+                                    operacion["stall_alert_retry_at"] = (
+                                        time.monotonic() + SFP_RESULT_RETRY_SECONDS
+                                    )
+                                    resultado_telegram = await _enviar_alerta_sfp(mensaje)
+                                    if (
+                                        isinstance(resultado_telegram, tuple)
+                                        and resultado_telegram[0]
+                                    ):
+                                        operacion["stall_alert_sent"] = True
+                            except (ccxt.BaseError, RuntimeError, ValueError, TypeError) as error:
+                                ahora_aviso = time.monotonic()
+                                if (
+                                    ahora_aviso - operacion["last_stall_data_warning_at"]
+                                    >= SFP_RESULT_RETRY_SECONDS
+                                ):
+                                    print(
+                                        f"⚠️ SFP {symbol}: no se pudo calcular el RoE para "
+                                        f"el aviso de operación estancada: {error}"
+                                    )
+                                    operacion["last_stall_data_warning_at"] = ahora_aviso
+                        if (
+                            symbol == "BTC/USDT:USDT"
+                            and operacion["direccion"] == "COMPRA"
+                            and time.monotonic() >= operacion["breakout_check_at"]
+                        ):
+                            operacion["breakout_check_at"] = (
+                                time.monotonic() + SFP_BREAKOUT_CHECK_SECONDS
+                            )
+                            velas_15m, velas_4h, velas_diarias = await asyncio.gather(
+                                exchange.fetch_ohlcv(symbol, timeframe="15m", limit=18),
+                                exchange.fetch_ohlcv(symbol, timeframe="4h", limit=91),
+                                exchange.fetch_ohlcv(symbol, timeframe="1d", limit=31),
+                            )
+                            ruptura = detect_strong_support_break(
+                                velas_15m,
+                                velas_4h,
+                                velas_diarias,
+                            )
+                            if ruptura is not None:
+                                timestamp_cierre = ruptura["timestamp"] + 15 * 60 * 1000
+                                ahora_ms = int(time.time() * 1000)
+                                if (
+                                    timestamp_cierre > operacion["opened_at_ms"]
+                                    and timestamp_cierre <= ahora_ms
+                                    and ruptura["level"] not in operacion["breakout_alerts_sent"]
+                                ):
+                                    hora_cierre = datetime.fromtimestamp(
+                                        timestamp_cierre / 1000,
+                                        timezone.utc,
+                                    ).astimezone(ZoneInfo("Europe/Madrid"))
+                                    mensaje = (
+                                        "⚠️ ATENCIÓN: OPERACIÓN POTENCIALMENTE PELIGROSA\n"
+                                        "BTC: una vela bajista grande de 15 minutos ha roto "
+                                        "un soporte psicológico relevante.\n"
+                                        f"Soporte: {ruptura['level']:,.0f} USDT\n"
+                                        f"Cierre de la vela (hora de Madrid): "
+                                        f"{hora_cierre:%Y-%m-%d %H:%M}\n"
+                                        f"Cierre: {ruptura['close']:,.2f} USDT | "
+                                        f"Cuerpo: {ruptura['bearish_body']:,.2f} USDT "
+                                        f"({ruptura['strength_atr']:.2f} ATR(14))\n"
+                                        "Considera tomar ganancias pronto; no esperes "
+                                        "necesariamente al +30% RoE. Este aviso es informativo: "
+                                        "no cierra ni modifica la operación."
+                                    )
+                                    print(mensaje)
+                                    resultado_telegram = await _enviar_alerta_sfp(mensaje)
+                                    if (
+                                        isinstance(resultado_telegram, tuple)
+                                        and resultado_telegram[0]
+                                    ):
+                                        operacion["breakout_alerts_sent"].add(ruptura["level"])
+                        await asyncio.sleep(SFP_POSITION_POLL_SECONDS)
+                        continue
+
+                    if not operacion["open_seen"]:
+                        orden_entrada = await exchange.fetch_order(operacion["order_id"], symbol)
+                        operacion["open_seen"] = (
+                            bool(float(orden_entrada.get("filled") or 0) > 0)
+                            or str(orden_entrada.get("status", "")).lower() in {"closed", "filled"}
+                        )
+                        if not operacion["open_seen"]:
+                            if str(orden_entrada.get("status", "")).lower() in {
+                                "canceled", "cancelled", "rejected", "expired",
+                            }:
+                                mensaje = (
+                                    f"⚠️ SFP {symbol}: Bitget cerró/rechazó la orden "
+                                    f"{operacion['order_id']} sin confirmar una posición abierta."
+                                )
+                                resultado_telegram = await _enviar_alerta_sfp(mensaje)
+                                if isinstance(resultado_telegram, tuple) and resultado_telegram[0]:
+                                    estado["operacion_abierta"] = None
+                            await asyncio.sleep(SFP_POSITION_POLL_SECONDS)
+                            continue
+
+                    ahora = time.monotonic()
+                    if operacion["pnl_cierre"] is None:
+                        trades = await exchange.fetch_my_trades(
+                            symbol,
+                            since=max(0, operacion["opened_at_ms"] - 60_000),
+                            limit=100,
+                            params={"marginMode": "isolated"},
+                        )
+                        pnl_cierre = _extraer_pnl_cierre_sfp(
+                            trades,
+                            operacion["direccion"],
+                            operacion["opened_at_ms"],
+                        )
+                        if pnl_cierre is None:
+                            if ahora - operacion["ultimo_intento_resultado"] >= SFP_RESULT_RETRY_SECONDS:
+                                print(
+                                    f"ℹ️ SFP {symbol}: posición cerrada, esperando fills de cierre "
+                                    "con PnL verificable en Bitget."
+                                )
+                                operacion["ultimo_intento_resultado"] = ahora
+                            await asyncio.sleep(SFP_POSITION_POLL_SECONDS)
+                            continue
+                        operacion["pnl_cierre"], operacion["cierres_pnl"] = pnl_cierre
+
+                    if ahora - operacion["ultimo_intento_resultado"] < SFP_RESULT_RETRY_SECONDS:
+                        await asyncio.sleep(SFP_POSITION_POLL_SECONDS)
+                        continue
+
+                    pnl = operacion["pnl_cierre"]
+                    resultado_texto = (
+                        "GANADA" if pnl > 0 else "PERDIDA" if pnl < 0 else "CERRADA EN EQUILIBRIO"
+                    )
+                    mensaje = (
+                        f"🧾 CIERRE SFP CONFIRMADO | {symbol}\n"
+                        f"Dirección: {operacion['direccion']}\n"
+                        f"Resultado: {resultado_texto}\n"
+                        f"PnL realizado informado por Bitget: {pnl:+.8f} USDT\n"
+                        f"Fills de cierre: {operacion['cierres_pnl']}"
+                    )
+                    operacion["ultimo_intento_resultado"] = ahora
+                    resultado_telegram = await _enviar_alerta_sfp(mensaje)
+                    if isinstance(resultado_telegram, tuple) and resultado_telegram[0]:
+                        estado["operacion_abierta"] = None
+                except (ccxt.BaseError, RuntimeError, ValueError, TypeError) as error:
+                    print(
+                        f"⚠️ SFP {symbol}: no se pudo verificar la posición, el cierre "
+                        f"o la alerta de ruptura: {error}"
+                    )
+                await asyncio.sleep(SFP_POSITION_POLL_SECONDS)
+
         tareas = []
         for estrategia in estrategias_activas:
             estado = estados[estrategia["symbol"]]
@@ -1631,6 +1931,7 @@ async def _motor_sfp_async():
                 (
                     asyncio.create_task(actualizar_niveles(estrategia, estado)),
                     asyncio.create_task(vigilar_precio(estrategia, estado)),
+                    asyncio.create_task(vigilar_cierre(estrategia, estado)),
                 )
             )
         try:
@@ -1671,48 +1972,32 @@ def telegram_listener():
                 if "message" in update:
                     message = update["message"]
                     chat_id = message.get("chat", {}).get("id")
-                    user_id = message.get("from", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
-                    if text in {"/senalahora", "/senal", "/signal", "senalahora", "senal", "signal", "!senal", "!senalahora"}:
-                        generar_senal_manual(chat_id=chat_id, requester_id=user_id)
-                    if text in {"/senalbtc", "/senalbtc", "senalbtc", "btcmanual"}:
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
                     if text in {"/trump", "/mentetrump", "/trumpmind", "trump", "mentetrump"}:
                         enviar_parte_diario_mente_trump(chat_id=chat_id)
                 if "callback_query" in update:
                     callback = update["callback_query"]
                     chat_id = callback.get("message", {}).get("chat", {}).get("id")
-                    user_id = callback.get("from", {}).get("id")
-                    data = callback.get("data", "")
-                    if data == "senal_btc":
-                        answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
-                        requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Generando señal BTC..."}, timeout=10)
-                        generar_senal_manual(chat_id=chat_id, mercado_seleccionado="btc", requester_id=user_id)
-                    elif data == "toggle_auto":
-                        if not es_admin_del_canal(user_id):
-                            answer_url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery"
-                            requests.post(answer_url, json={"callback_query_id": callback.get("id"), "text": "Solo administradores pueden cambiar estos estados."}, timeout=10)
-                        else:
-                            AUTO_SIGNAL_ENABLED = not AUTO_SIGNAL_ENABLED
-                            estado = "ON" if AUTO_SIGNAL_ENABLED else "OFF"
-                            detalle = f"Señales automáticas ahora {estado}."
-                            requests.post(
-                                f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery",
-                                json={"callback_query_id": callback.get("id"), "text": detalle},
-                                timeout=10,
-                            )
-                            actualizar_teclado_callback(callback)
-                            enviar_senal_telegram(f"⚙️ {detalle} (admin {user_id}).", chat_id=CHAT_ID_CANAL)
-                    elif data == "toggle_binarias":
+                    requests.post(
+                        f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery",
+                        json={
+                            "callback_query_id": callback.get("id"),
+                            "text": "El bot solo envía señales automáticas SFP de Bitget.",
+                        },
+                        timeout=10,
+                    )
+                    mensaje = callback.get("message", {})
+                    message_id = mensaje.get("message_id")
+                    if chat_id and message_id:
                         requests.post(
-                            f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery",
+                            f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/editMessageReplyMarkup",
                             json={
-                                "callback_query_id": callback.get("id"),
-                                "text": "Las señales binarias están desactivadas.",
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "reply_markup": {"inline_keyboard": []},
                             },
                             timeout=10,
                         )
-                        actualizar_teclado_callback(callback)
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
@@ -1724,9 +2009,8 @@ def motor_de_trading():
     print("📊 Señales binarias desactivadas.")
     time.sleep(5)
 
-    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Algoritmo de sincronización activado. Escaneando el mercado en vivo clonando la estrategia de TradingView para compra y venta..."
+    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Servicio iniciado. Las señales de trading publicadas corresponden a la estrategia SFP de Bitget."
     enviar_senal_telegram(alerta_inicio)
-    enviar_boton_solicitud(chat_id=CHAT_ID_CANAL)
 
     while True:
         try:
@@ -1738,6 +2022,10 @@ def motor_de_trading():
             limpiar_solicitudes_si_es_necesario()
             hora_actual = hora_espana()
             intentar_enviar_parte_diario_trump(hora_actual)
+            if not LEGACY_SIGNALS_ENABLED:
+                time.sleep(60)
+                continue
+
             senal_enviada = False
 
             for mercado in CONFIGURACIONES_MERCADO:
