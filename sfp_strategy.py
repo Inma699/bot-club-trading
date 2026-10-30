@@ -6,6 +6,12 @@ from zoneinfo import ZoneInfo
 
 
 SPAIN_TIMEZONE = ZoneInfo("Europe/Madrid")
+BREAKOUT_LEVEL_STEP_USDT = 5_000.0
+BREAKOUT_TOUCH_TOLERANCE_PERCENT = 0.0025
+BREAKOUT_MIN_4H_TOUCHES = 3
+BREAKOUT_MIN_BODY_ATR = 1.5
+BTC_STALLED_TRADE_ALERT_AFTER_SECONDS = 4 * 60 * 60
+BTC_STALLED_TRADE_ALERT_TARGET_ROE = 30.0
 
 
 def is_sfp_trading_window_open(now: datetime | None = None) -> bool:
@@ -59,6 +65,118 @@ class SFPReclaimDetector:
             self.reset()
             return "VENTA"
         return None
+
+
+def calculate_roe_percent(
+    direction: str,
+    entry_price: float,
+    current_price: float,
+    leverage: float,
+) -> float:
+    if direction not in {"COMPRA", "VENTA"}:
+        raise ValueError("La dirección debe ser COMPRA o VENTA.")
+    if (
+        not isfinite(entry_price)
+        or not isfinite(current_price)
+        or entry_price <= 0
+        or current_price <= 0
+        or not isfinite(leverage)
+        or leverage <= 0
+    ):
+        raise ValueError("Precio de entrada, precio actual y apalancamiento deben ser positivos.")
+
+    price_change = (current_price - entry_price) / entry_price
+    if direction == "VENTA":
+        price_change *= -1
+    return price_change * leverage * 100
+
+
+def should_alert_stalled_btc_trade(elapsed_seconds: float, max_roe_percent: float) -> bool:
+    return (
+        elapsed_seconds >= BTC_STALLED_TRADE_ALERT_AFTER_SECONDS
+        and max_roe_percent < BTC_STALLED_TRADE_ALERT_TARGET_ROE
+    )
+
+
+def detect_strong_support_break(
+    candles_15m: Sequence[Sequence[float]],
+    candles_4h: Sequence[Sequence[float]],
+    daily_candles: Sequence[Sequence[float]],
+) -> dict[str, float | int] | None:
+    closed_15m = candles_15m[:-1]
+    if len(closed_15m) < 16:
+        return None
+
+    previous_candle = closed_15m[-2]
+    breakdown_candle = closed_15m[-1]
+    candle_open = float(breakdown_candle[1])
+    candle_close = float(breakdown_candle[4])
+    previous_close = float(previous_candle[4])
+    bearish_body = candle_open - candle_close
+    if bearish_body <= 0 or previous_close <= candle_close:
+        return None
+
+    atr_candles = closed_15m[-16:-1]
+    true_ranges = []
+    for index in range(1, len(atr_candles)):
+        candle = atr_candles[index]
+        previous_atr_close = float(atr_candles[index - 1][4])
+        true_ranges.append(
+            max(
+                float(candle[2]) - float(candle[3]),
+                abs(float(candle[2]) - previous_atr_close),
+                abs(float(candle[3]) - previous_atr_close),
+            )
+        )
+    if len(true_ranges) != 14:
+        return None
+    atr_14 = sum(true_ranges) / len(true_ranges)
+    if atr_14 <= 0 or bearish_body < atr_14 * BREAKOUT_MIN_BODY_ATR:
+        return None
+
+    support_candles_4h = candles_4h[:-1][-90:]
+    support_candles_daily = daily_candles[:-1][-30:]
+    if len(support_candles_4h) < BREAKOUT_MIN_4H_TOUCHES:
+        return None
+
+    first_level = int(candle_close // BREAKOUT_LEVEL_STEP_USDT) + 1
+    last_level = int(previous_close // BREAKOUT_LEVEL_STEP_USDT)
+    broken_levels = []
+    for multiple in range(first_level, last_level + 1):
+        level = multiple * BREAKOUT_LEVEL_STEP_USDT
+        tolerance = level * BREAKOUT_TOUCH_TOLERANCE_PERCENT
+        touches_4h = sum(
+            1
+            for candle in support_candles_4h
+            if float(candle[3]) <= level + tolerance
+            and float(candle[2]) >= level - tolerance
+        )
+        touches_daily = sum(
+            1
+            for candle in support_candles_daily
+            if float(candle[3]) <= level + tolerance
+            and float(candle[2]) >= level - tolerance
+        )
+        if (
+            touches_4h >= BREAKOUT_MIN_4H_TOUCHES
+            or (touches_daily >= 1 and touches_4h >= 1)
+        ):
+            broken_levels.append((level, touches_4h, touches_daily))
+
+    if not broken_levels:
+        return None
+
+    level, touches_4h, touches_daily = max(broken_levels, key=lambda item: item[0])
+    return {
+        "level": level,
+        "close": candle_close,
+        "timestamp": int(breakdown_candle[0]),
+        "bearish_body": bearish_body,
+        "atr_14": atr_14,
+        "strength_atr": bearish_body / atr_14,
+        "touches_4h": touches_4h,
+        "touches_daily": touches_daily,
+    }
 
 
 def previous_day_levels(
