@@ -151,15 +151,15 @@ SFP_STRATEGIES = (
         "symbol": "BTC/USDT:USDT",
         "margin_usdt": 1.0,
         "leverage": 70,
-        "stop_roe_percent": 60.0,
-        "take_profit_roe_percent": 45.0,
+        "stop_roe_percent": 50.0,
+        "take_profit_roe_percent": 30.0,
     },
     {
         "symbol": "SPCX/USDT:USDT",
         "margin_usdt": 1.0,
         "leverage": 40,
-        "stop_roe_percent": 70.0,
-        "take_profit_roe_percent": 40.0,
+        "stop_roe_percent": 50.0,
+        "take_profit_roe_percent": 30.0,
         "default_direction_mode": "VENTA",
     },
 )
@@ -169,6 +169,7 @@ SFP_DIRECTION_MODE_LABELS = {
     "AMBAS": "COMPRA + VENTA",
 }
 SFP_DIRECTION_LOCK = threading.Lock()
+SFP_ENTRIES_ENABLED = True
 SFP_ALLOWED_DIRECTIONS = {
     estrategia["symbol"]: set(
         directions_for_mode(estrategia.get("default_direction_mode", "AMBAS"))
@@ -592,6 +593,17 @@ def _direcciones_permitidas_sfp(symbol):
         return frozenset(SFP_ALLOWED_DIRECTIONS[symbol])
 
 
+def _aperturas_sfp_habilitadas():
+    with SFP_DIRECTION_LOCK:
+        return SFP_ENTRIES_ENABLED
+
+
+def _establecer_aperturas_sfp_habilitadas(enabled):
+    global SFP_ENTRIES_ENABLED
+    with SFP_DIRECTION_LOCK:
+        SFP_ENTRIES_ENABLED = bool(enabled)
+
+
 def _establecer_modo_direccion_sfp(symbol, mode):
     if symbol not in SFP_ALLOWED_DIRECTIONS:
         raise ValueError(f"Modo de dirección SFP no válido para {symbol}: {mode}")
@@ -625,12 +637,20 @@ def _teclado_direcciones_sfp():
                 "callback_data": f"sfp_direction:{label}:{mode}",
             })
         keyboard.append(row)
+    entries_enabled = _aperturas_sfp_habilitadas()
+    keyboard.append([
+        {
+            "text": "⏸ Pausar nuevas aperturas" if entries_enabled else "▶ Reanudar nuevas aperturas",
+            "callback_data": "sfp_entries:pause" if entries_enabled else "sfp_entries:resume",
+        }
+    ])
     return {"inline_keyboard": keyboard}
 
 
 def _mensaje_inicio_bot():
     btc_directions = _direcciones_permitidas_sfp("BTC/USDT:USDT")
     spcx_directions = _direcciones_permitidas_sfp("SPCX/USDT:USDT")
+    entries_status = "ACTIVAS" if _aperturas_sfp_habilitadas() else "PAUSADAS"
 
     def format_directions(directions):
         order = ("COMPRA", "VENTA")
@@ -647,11 +667,14 @@ def _mensaje_inicio_bot():
         f"• Direcciones permitidas: BTC {format_directions(btc_directions)}; "
         f"SPCX {format_directions(spcx_directions)}. El horario de búsqueda es "
         "07:00–22:00, hora de Madrid.\n"
-        "• En modo real, usa margen aislado y los SL/TP RoE configurados para cada par. "
+        f"• Estado de nuevas aperturas: {entries_status}. Al pausar, no se envían señales "
+        "ni se abren operaciones nuevas; las posiciones abiertas no se modifican.\n"
+        "• En operaciones nuevas: SL 50% y TP 30% RoE en ambos pares; se conserva "
+        "apalancamiento BTC 70x y SPCX 40x. "
         "La estrategia no garantiza beneficios ni confirma actividad institucional. "
         "El motor automático solo funciona si está habilitado en Render.\n"
         "Los administradores pueden cambiar las direcciones con los botones. "
-        "La selección dura hasta el próximo reinicio.\n\n"
+        "Los cambios duran hasta el próximo reinicio.\n\n"
         "⚠️ AVISO PARA OPERACIONES BTC\n"
         "Si una operación permanece abierta más de 4 horas sin alcanzar +30% RoE "
         "(umbral de aviso; no cambia el TP configurado) y se queda cerca del +15%, "
@@ -1438,8 +1461,12 @@ async def _cargar_niveles_sfp(exchange, symbol):
 
 async def _abrir_operacion_sfp(exchange, estrategia, direccion, precio):
     symbol = estrategia["symbol"]
+    if not _aperturas_sfp_habilitadas():
+        print(f"⏸️ Aperturas SFP pausadas; se cancela la nueva entrada de {symbol}.")
+        return None
     if direccion not in _direcciones_permitidas_sfp(symbol):
-        raise ValueError(f"La dirección {direccion} está deshabilitada para {symbol}.")
+        print(f"⏭️ Dirección {direccion} deshabilitada para {symbol}; no se abre la posición.")
+        return None
 
     posiciones = await exchange.fetch_positions([symbol])
     for posicion in posiciones:
@@ -1493,6 +1520,14 @@ async def _abrir_operacion_sfp(exchange, estrategia, direccion, precio):
             "type": "mark_price",
         },
     }
+    if not _aperturas_sfp_habilitadas():
+        print(f"⏸️ Aperturas SFP pausadas antes del envío de la orden para {symbol}.")
+        return None
+    if direccion not in _direcciones_permitidas_sfp(symbol):
+        print(
+            f"⏭️ Dirección {direccion} deshabilitada antes del envío de la orden para {symbol}."
+        )
+        return None
     orden = await exchange.create_order(
         symbol,
         "market",
@@ -1627,6 +1662,12 @@ async def _motor_sfp_async():
                     continue
 
                 estado["detector"].reset()
+                if not _aperturas_sfp_habilitadas():
+                    print(
+                        f"⏸️ Aperturas automáticas pausadas; señal {direccion} "
+                        f"de {symbol} descartada."
+                    )
+                    continue
                 if direccion not in _direcciones_permitidas_sfp(symbol):
                     print(
                         f"⏭️ Señal automática {direccion} descartada para {symbol}; "
@@ -1997,6 +2038,8 @@ def telegram_listener():
                     callback_data = callback.get("data", "")
                     if callback_data.startswith("sfp_direction:"):
                         _procesar_callback_direccion_sfp(callback)
+                    elif callback_data.startswith("sfp_entries:"):
+                        _procesar_callback_aperturas_sfp(callback)
                     else:
                         mensaje = callback.get("message", {})
                         chat_id = mensaje.get("chat", {}).get("id")
@@ -2109,6 +2152,59 @@ def _procesar_callback_direccion_sfp(callback):
         f"{par}: {SFP_DIRECTION_MODE_LABELS[modo]} hasta el próximo reinicio.",
     )
 
+    _telegram_post(
+        "editMessageText",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": _mensaje_inicio_bot(),
+            "reply_markup": _teclado_direcciones_sfp(),
+        },
+    )
+
+
+def _procesar_callback_aperturas_sfp(callback):
+    callback_id = callback.get("id")
+    usuario_id = callback.get("from", {}).get("id")
+    if not es_admin_del_canal(usuario_id):
+        _responder_callback_telegram(
+            callback_id,
+            "Solo los administradores pueden pausar o reanudar aperturas.",
+            show_alert=True,
+        )
+        return
+
+    action = callback.get("data", "").partition(":")[2]
+    if action not in {"pause", "resume"}:
+        _responder_callback_telegram(callback_id, "Acción no válida.", show_alert=True)
+        return
+
+    mensaje = callback.get("message", {})
+    chat_id = mensaje.get("chat", {}).get("id")
+    message_id = mensaje.get("message_id")
+    if not chat_id or not message_id or str(chat_id) != str(CHAT_ID_CANAL):
+        _responder_callback_telegram(
+            callback_id,
+            "Este control solo funciona en el mensaje original del canal.",
+            show_alert=True,
+        )
+        return
+
+    entries_enabled = action == "resume"
+    if _aperturas_sfp_habilitadas() == entries_enabled:
+        status = "ya están activas" if entries_enabled else "ya están pausadas"
+        _responder_callback_telegram(callback_id, f"Las aperturas {status}.")
+        return
+
+    _establecer_aperturas_sfp_habilitadas(entries_enabled)
+    if entries_enabled:
+        respuesta = "Aperturas nuevas reanudadas para BTC y SPCX."
+    else:
+        respuesta = (
+            "Nuevas aperturas pausadas para BTC y SPCX. Las posiciones abiertas "
+            "y sus SL/TP no se han modificado."
+        )
+    _responder_callback_telegram(callback_id, respuesta)
     _telegram_post(
         "editMessageText",
         {
