@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from flask import Flask
-import anthropic
+from macro_news import format_macro_news_summary
 from sfp_strategy import (
     BTC_STALLED_TRADE_ALERT_AFTER_SECONDS,
     BTC_STALLED_TRADE_ALERT_TARGET_ROE,
@@ -20,6 +20,7 @@ from sfp_strategy import (
     calculate_roe_percent,
     calculate_exit_prices,
     detect_strong_support_break,
+    directions_for_mode,
     is_sfp_trading_window_open,
     previous_day_levels,
     should_alert_stalled_btc_trade,
@@ -59,24 +60,6 @@ def _symbol_futuros_ccxt(symbol):
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "").strip()
 CHAT_ID_CANAL = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# === INTEGRACIÓN ANTHROPIC (ANÁLISIS MACRO "ESTILO TRUMP") ===
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5").strip()
-ANALISIS_TRUMP_ENABLED = os.getenv("ANALISIS_TRUMP_ENABLED", "true").strip().lower() in {"1", "true", "on", "si", "sí"}
-# Cliente perezoso: solo se crea si hay clave configurada, para no romper el arranque si falta.
-_cliente_anthropic = None
-if ANTHROPIC_API_KEY:
-    try:
-        _cliente_anthropic = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    except Exception as error:
-        print(f"⚠️ No se pudo inicializar el cliente Anthropic: {error}")
-        _cliente_anthropic = None
-else:
-    print("ℹ️ ANTHROPIC_API_KEY no configurada. El análisis macro 'estilo Trump' quedará desactivado.")
-
-# Se guarda también el intento fallido para no volver a consultar Claude más de una vez al día.
-CACHE_ANALISIS_TRUMP = {"fecha": None, "texto": None, "intento_realizado": False}
-
 # === CONFIGURACIÓN DE MERCADOS ===
 CONFIGURACIONES_MERCADO = [
     {"symbol": "BTCUSDT", "interval": "15m", "nombre": "BTCUSDT (15m)"},
@@ -92,11 +75,15 @@ ESTADISTICAS = {
     "ultimo_resumen": None,
 }
 
-# Hora (Europe/Madrid, formato HH:MM) y control del parte diario automático de "la mente de Trump"
-PARTE_TRUMP_HORA = os.getenv("PARTE_TRUMP_HORA", "13:00").strip()
-ULTIMO_PARTE_TRUMP_ENVIADO = None
-ULTIMO_INTENTO_PARTE_TRUMP = 0.0
-PARTE_TRUMP_REINTENTO_SEGUNDOS = 300
+# Hora (Europe/Madrid, formato HH:MM) del resumen macro diario basado en RSS.
+# PARTE_TRUMP_HORA se mantiene como fallback para conservar la configuración existente en Render.
+RESUMEN_MACRO_HORA = os.getenv(
+    "RESUMEN_MACRO_HORA",
+    os.getenv("PARTE_TRUMP_HORA", "13:00"),
+).strip()
+ULTIMO_RESUMEN_MACRO_ENVIADO = None
+ULTIMO_INTENTO_RESUMEN_MACRO_FECHA = None
+ERRORES_RSS_MACRO = []
 
 # === SEGUIMIENTO DE OPERACIONES ABIERTAS ===
 OPERACIONES_ABIERTAS = []
@@ -162,20 +149,32 @@ SFP_HEDGED_MODE = True
 SFP_STRATEGIES = (
     {
         "symbol": "BTC/USDT:USDT",
-        "margin_usdt": 2.0,
+        "margin_usdt": 1.0,
         "leverage": 70,
-        "stop_roe_percent": 65.0,
-        "take_profit_roe_percent": 35.0,
+        "stop_roe_percent": 60.0,
+        "take_profit_roe_percent": 45.0,
     },
     {
         "symbol": "SPCX/USDT:USDT",
-        "margin_usdt": 2.0,
+        "margin_usdt": 1.0,
         "leverage": 40,
-        "stop_roe_percent": 65.0,
-        "take_profit_roe_percent": 36.0,
-        "short_only": True,
+        "stop_roe_percent": 70.0,
+        "take_profit_roe_percent": 40.0,
+        "default_direction_mode": "VENTA",
     },
 )
+SFP_DIRECTION_MODE_LABELS = {
+    "COMPRA": "Solo COMPRA",
+    "VENTA": "Solo VENTA",
+    "AMBAS": "COMPRA + VENTA",
+}
+SFP_DIRECTION_LOCK = threading.Lock()
+SFP_ALLOWED_DIRECTIONS = {
+    estrategia["symbol"]: set(
+        directions_for_mode(estrategia.get("default_direction_mode", "AMBAS"))
+    )
+    for estrategia in SFP_STRATEGIES
+}
 
 
 @app.route('/stop')
@@ -242,85 +241,23 @@ def obtener_noticias_gratis(consulta, max_items=6, idioma="es-419", pais="US"):
                 titulares.append(titulo.strip())
         return titulares
     except Exception as error:
+        ERRORES_RSS_MACRO.append(f"{type(error).__name__}: {error}")
         print(f"⚠️ No se pudieron obtener noticias para '{consulta}': {error}")
         return []
 
 
 def recopilar_noticias_macro_diarias():
-    """Agrupa titulares del día sobre Trump, Bitcoin y la Fed desde una fuente gratuita."""
+    """Agrupa titulares recientes de Google News RSS sobre BTC y su contexto macro."""
+    ERRORES_RSS_MACRO.clear()
     consultas = {
-        "Donald Trump economía": "Donald Trump economy OR tariffs OR Federal Reserve",
-        "Bitcoin": "Bitcoin price OR crypto market",
-        "Reserva Federal": "Federal Reserve interest rates OR Jerome Powell",
+        "Economía y política": "Donald Trump economy OR tariffs OR Federal Reserve when:1d",
+        "Bitcoin": "Bitcoin price OR crypto market when:1d",
+        "Reserva Federal": "Federal Reserve interest rates OR Jerome Powell when:1d",
     }
     bloque_noticias = {}
     for etiqueta, consulta in consultas.items():
         bloque_noticias[etiqueta] = obtener_noticias_gratis(consulta, max_items=5)
     return bloque_noticias
-
-
-def generar_analisis_trump_ia():
-    """
-    Usa la API oficial de Anthropic (Claude) para generar un análisis de sentimiento
-    macro de mercado, narrado con la personalidad retórica de Donald Trump, a partir
-    de titulares de noticias reales del día sobre Trump, Bitcoin y la Fed.
-
-    Devuelve un texto breve listo para insertar en los mensajes de Telegram.
-    Si Anthropic no está configurado o falla, devuelve None (no rompe el flujo del bot).
-    """
-    global CACHE_ANALISIS_TRUMP
-
-    if not ANALISIS_TRUMP_ENABLED or _cliente_anthropic is None:
-        return None
-
-    hoy = hora_espana().date().isoformat()
-    if CACHE_ANALISIS_TRUMP["fecha"] == hoy and CACHE_ANALISIS_TRUMP["intento_realizado"]:
-        return CACHE_ANALISIS_TRUMP["texto"]
-
-    CACHE_ANALISIS_TRUMP = {
-        "fecha": hoy,
-        "texto": None,
-        "intento_realizado": True,
-    }
-
-    noticias = recopilar_noticias_macro_diarias()
-    resumen_noticias = []
-    for etiqueta, titulares in noticias.items():
-        if titulares:
-            resumen_noticias.append(f"{etiqueta}:\n" + "\n".join(f"- {t}" for t in titulares))
-    texto_noticias = "\n\n".join(resumen_noticias) if resumen_noticias else "Sin titulares disponibles hoy."
-
-    dia_semana = hora_espana().strftime("%A")
-    prompt = (
-        "Eres un analista de mercados que redacta un breve parte macro DIARIO para un canal de trading de BTC/USDT. "
-        "Debes narrarlo imitando el ESTILO RETÓRICO de Donald Trump (frases cortas, contundente, mayúsculas ocasionales "
-        "para énfasis, superlativos como 'tremendo', 'nadie lo ha visto nunca', 'increíble'), pero el contenido debe ser "
-        "un análisis de sentimiento de mercado SERIO y útil, basado ÚNICAMENTE en los titulares reales que te paso abajo. "
-        "No inventes declaraciones textuales de Trump ni cites frases como si fueran suyas; es una PARODIA analítica, "
-        "no una cita real. Al final añade una conclusión sobre si el sesgo del día es alcista, bajista o neutro para BTC, "
-        "y qué día de la semana (de los próximos 7) ves con más probabilidad de un movimiento fuerte, justificando brevemente "
-        "por qué (ej. reunión de la Fed, fecha de anuncio, vencimiento de opciones, etc. si aparece en las noticias). "
-        f"Hoy es {dia_semana}. Máximo 90 palabras. Responde en español. Incluye SIEMPRE un disclaimer final corto de que "
-        "esto no es consejo financiero.\n\n"
-        f"TITULARES DE HOY:\n{texto_noticias}"
-    )
-
-    try:
-        respuesta = _cliente_anthropic.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        texto = "".join(
-            bloque.text for bloque in respuesta.content if getattr(bloque, "type", None) == "text"
-        ).strip()
-        if texto:
-            CACHE_ANALISIS_TRUMP["texto"] = texto
-            return texto
-    except Exception as error:
-        print(f"⚠️ Error consultando Anthropic/Claude para el análisis macro: {error}")
-
-    return CACHE_ANALISIS_TRUMP["texto"]
 
 
 def evaluar_noticias_alto_impacto(hora_actual):
@@ -650,7 +587,85 @@ def actualizar_operaciones_abiertas(cierres, datos, mercado):
         enviar_senal_telegram(mensaje_cierre)
 
 
-def enviar_senal_telegram(mensaje, chat_id=None):
+def _direcciones_permitidas_sfp(symbol):
+    with SFP_DIRECTION_LOCK:
+        return frozenset(SFP_ALLOWED_DIRECTIONS[symbol])
+
+
+def _establecer_modo_direccion_sfp(symbol, mode):
+    if symbol not in SFP_ALLOWED_DIRECTIONS:
+        raise ValueError(f"Modo de dirección SFP no válido para {symbol}: {mode}")
+    directions = directions_for_mode(mode)
+    with SFP_DIRECTION_LOCK:
+        SFP_ALLOWED_DIRECTIONS[symbol] = set(directions)
+
+
+def _modo_direccion_actual_sfp(symbol):
+    directions = _direcciones_permitidas_sfp(symbol)
+    if directions == directions_for_mode("AMBAS"):
+        return "AMBAS"
+    return next(iter(directions))
+
+
+def _teclado_direcciones_sfp():
+    symbols = (
+        ("BTC/USDT:USDT", "BTC"),
+        ("SPCX/USDT:USDT", "SPCX"),
+    )
+    keyboard = []
+    for symbol, label in symbols:
+        modes = ("COMPRA", "VENTA", "AMBAS") if label == "BTC" else ("COMPRA", "VENTA")
+        row = []
+        current_mode = _modo_direccion_actual_sfp(symbol)
+        for mode in modes:
+            selected = mode == current_mode
+            button_label = SFP_DIRECTION_MODE_LABELS[mode]
+            row.append({
+                "text": f"{'✅ ' if selected else ''}{label}: {button_label}",
+                "callback_data": f"sfp_direction:{label}:{mode}",
+            })
+        keyboard.append(row)
+    return {"inline_keyboard": keyboard}
+
+
+def _mensaje_inicio_bot():
+    btc_directions = _direcciones_permitidas_sfp("BTC/USDT:USDT")
+    spcx_directions = _direcciones_permitidas_sfp("SPCX/USDT:USDT")
+
+    def format_directions(directions):
+        order = ("COMPRA", "VENTA")
+        return " y ".join(direction for direction in order if direction in directions)
+
+    return (
+        "🦈 CLUB MARKETSHARKS\n\n"
+        "🤖 Servicio iniciado. El sistema automático de Bitget busca barridas y recuperaciones "
+        "de niveles del día anterior (UTC):\n"
+        "• Calcula el máximo y mínimo del día UTC anterior como resistencia y soporte.\n"
+        "• Espera que el precio sobrepase uno de esos niveles al menos un 0,25% y luego "
+        "lo recupere: compra tras barrer y recuperar el soporte; venta tras barrer y "
+        "perder de nuevo la resistencia.\n"
+        f"• Direcciones permitidas: BTC {format_directions(btc_directions)}; "
+        f"SPCX {format_directions(spcx_directions)}. El horario de búsqueda es "
+        "07:00–22:00, hora de Madrid.\n"
+        "• En modo real, usa margen aislado y los SL/TP RoE configurados para cada par. "
+        "La estrategia no garantiza beneficios ni confirma actividad institucional. "
+        "El motor automático solo funciona si está habilitado en Render.\n"
+        "Los administradores pueden cambiar las direcciones con los botones. "
+        "La selección dura hasta el próximo reinicio.\n\n"
+        "⚠️ AVISO PARA OPERACIONES BTC\n"
+        "Si una operación permanece abierta más de 4 horas sin alcanzar +30% RoE "
+        "(umbral de aviso; no cambia el TP configurado) y se queda cerca del +15%, "
+        "prepárate: puede indicar pérdida de impulso o un posible cambio fuerte de "
+        "tendencia en contra de la señal.\n"
+        "Mantén el SL original: si se ejecuta, se asume la pérdida. No añadas "
+        "posiciones en la misma dirección de la señal. Una subida o caída artificial "
+        "del precio es una posibilidad, pero no puede confirmarse solo con estos datos.\n"
+        "Este aviso es informativo: el bot no modificará el SL ni abrirá posiciones "
+        "adicionales."
+    )
+
+
+def enviar_senal_telegram(mensaje, chat_id=None, reply_markup=None):
     target_chat = chat_id or CHAT_ID_CANAL
     if not TOKEN_TELEGRAM or not target_chat:
         print("⚠️ Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en Render")
@@ -659,6 +674,8 @@ def enviar_senal_telegram(mensaje, chat_id=None):
     url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
     # Enviar como texto plano para evitar errores de parseo de entidades
     payload = {"chat_id": target_chat, "text": mensaje}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
         print(f"➡️ Enviando mensaje a Telegram chat={target_chat} payload_len={len(mensaje)}")
         response = requests.post(url, json=payload, timeout=10)
@@ -692,52 +709,38 @@ def enviar_resumen_diario():
     ESTADISTICAS["ultimo_resumen"] = hoy
 
 
-def enviar_parte_diario_mente_trump(chat_id=None):
-    """
-    Envía a Telegram un mensaje dedicado con la 'lectura macro estilo Trump' generada
-    por Claude (Anthropic) a partir de noticias reales del día sobre Trump, Bitcoin y la Fed,
-    incluyendo su opinión sobre qué día de la semana podría moverse BTC con fuerza.
-    """
-    analisis_trump = generar_analisis_trump_ia()
-    if not analisis_trump:
-        mensaje = (
-            "🧠 *LA MENTE DE TRUMP SOBRE BTC*\n\n"
-            "⚠️ No se pudo generar el análisis macro ahora mismo (falta ANTHROPIC_API_KEY o hubo un error de red). "
-            "Inténtalo de nuevo más tarde."
-        )
-    else:
-        mensaje = (
-            "🧠 *LA MENTE DE TRUMP SOBRE BTC* 🇺🇸\n\n"
-            f"{analisis_trump}\n\n"
-            "ℹ️ Generado por IA (Claude/Anthropic) a partir de titulares reales del día. "
-            "Es una parodia analítica, NO declaraciones reales de Donald Trump ni asesoramiento financiero."
-        )
+def enviar_resumen_macro_rss(chat_id=None):
+    """Publica titulares RSS y un sesgo por reglas, sin usar servicios de IA."""
+    noticias = recopilar_noticias_macro_diarias()
+    mensaje = format_macro_news_summary(noticias, ERRORES_RSS_MACRO)
     return enviar_senal_telegram(mensaje, chat_id=chat_id)
 
 
-def intentar_enviar_parte_diario_trump(hora_actual):
-    global ULTIMO_PARTE_TRUMP_ENVIADO, ULTIMO_INTENTO_PARTE_TRUMP
+def intentar_enviar_resumen_macro(hora_actual):
+    global ULTIMO_RESUMEN_MACRO_ENVIADO, ULTIMO_INTENTO_RESUMEN_MACRO_FECHA
 
     hoy = hora_actual.strftime("%Y-%m-%d")
-    if hora_actual.strftime("%H:%M") < PARTE_TRUMP_HORA:
+    if hora_actual.strftime("%H:%M") < RESUMEN_MACRO_HORA:
         return
-    if ULTIMO_PARTE_TRUMP_ENVIADO == hoy:
+    if ULTIMO_INTENTO_RESUMEN_MACRO_FECHA == hoy:
         return
-
-    ahora = time.time()
-    if ahora - ULTIMO_INTENTO_PARTE_TRUMP < PARTE_TRUMP_REINTENTO_SEGUNDOS:
-        return
-    ULTIMO_INTENTO_PARTE_TRUMP = ahora
+    ULTIMO_INTENTO_RESUMEN_MACRO_FECHA = hoy
 
     try:
-        resultado = enviar_parte_diario_mente_trump(chat_id=CHAT_ID_CANAL)
+        resultado = enviar_resumen_macro_rss(chat_id=CHAT_ID_CANAL)
         if isinstance(resultado, tuple) and resultado[0]:
-            ULTIMO_PARTE_TRUMP_ENVIADO = hoy
-            print(f"✅ Parte diario de 'la mente de Trump' enviado ({hoy}, hora de España).")
+            ULTIMO_RESUMEN_MACRO_ENVIADO = hoy
+            print(f"✅ Resumen macro diario RSS enviado ({hoy}, hora de España).")
         else:
-            print("⚠️ No se confirmó el envío del parte diario de Trump a Telegram; se reintentará.")
+            print(
+                "⚠️ No se confirmó el envío del resumen macro RSS a Telegram; "
+                "no se reintentará hasta mañana."
+            )
     except Exception as error:
-        print(f"⚠️ No se pudo enviar el parte diario de 'la mente de Trump': {error}")
+        print(
+            "⚠️ No se pudo enviar el resumen macro RSS; "
+            f"no se reintentará hasta mañana: {error}"
+        )
 
 
 def calcular_niveles_senal(direccion, precio, cierres, altos, bajos):
@@ -1026,7 +1029,7 @@ def generar_senal_manual(chat_id=None, mercado_seleccionado=None, requester_id=N
         if chat_id:
             enviar_senal_telegram(
                 "ℹ️ Las señales manuales anteriores están desactivadas. "
-                "El bot solo publica las operaciones de la estrategia SFP de Bitget.",
+                "El bot solo publica operaciones automáticas de Bitget.",
                 chat_id=chat_id,
             )
         return False
@@ -1435,8 +1438,8 @@ async def _cargar_niveles_sfp(exchange, symbol):
 
 async def _abrir_operacion_sfp(exchange, estrategia, direccion, precio):
     symbol = estrategia["symbol"]
-    if estrategia.get("short_only") and direccion != "VENTA":
-        raise ValueError(f"La estrategia SFP de {symbol} solo permite abrir ventas.")
+    if direccion not in _direcciones_permitidas_sfp(symbol):
+        raise ValueError(f"La dirección {direccion} está deshabilitada para {symbol}.")
 
     posiciones = await exchange.fetch_positions([symbol])
     for posicion in posiciones:
@@ -1624,14 +1627,17 @@ async def _motor_sfp_async():
                     continue
 
                 estado["detector"].reset()
-                if estrategia.get("short_only") and direccion != "VENTA":
-                    print(f"⏭️ SFP {symbol}: señal COMPRA descartada; este símbolo solo opera ventas.")
+                if direccion not in _direcciones_permitidas_sfp(symbol):
+                    print(
+                        f"⏭️ Señal automática {direccion} descartada para {symbol}; "
+                        "esa dirección está deshabilitada desde Telegram."
+                    )
                     continue
 
                 if not SFP_LIVE_TRADING:
                     estado["cooldown_hasta"] = time.monotonic() + SFP_COOLDOWN_SECONDS
                     mensaje = (
-                        f"🔔 SFP {direccion} | {symbol}\n"
+                        f"🔔 SEÑAL AUTOMÁTICA {direccion} | {symbol}\n"
                         f"Nivel barrido y recuperado: {niveles.low if direccion == 'COMPRA' else niveles.high:,.2f}\n"
                         f"Precio: {precio:,.2f}\n"
                         "Modo señales; no se envió ninguna orden."
@@ -1690,8 +1696,8 @@ async def _motor_sfp_async():
                         else "precio detectado al enviar la orden"
                     )
                     mensaje = (
-                        "🦈 SEÑAL: OPERA COMO LOS PECES GORDOS INSTITUCIONALES\n"
-                        f"✅ Orden SFP {direccion} enviada | {symbol}\n"
+                        "🦈 SEÑAL AUTOMÁTICA\n"
+                        f"✅ Orden {direccion} enviada | {symbol}\n"
                         f"📍 Entrada ({origen_entrada}): {float(precio_entrada):,.2f}\n"
                         f"🎯 Take Profit: {take_profit:,.2f}\n"
                         f"🛑 Stop Loss: {stop_loss:,.2f}\n"
@@ -1766,18 +1772,24 @@ async def _motor_sfp_async():
                                         int(time.time() * 1000) - operacion["opened_at_ms"]
                                     ) / 3_600_000
                                     mensaje = (
-                                        "⏳ AVISO SFP BTC: OPERACIÓN ABIERTA MÁS DE 4 HORAS\n"
+                                        "⏳ AVISO BTC: OPERACIÓN ABIERTA MÁS DE 4 HORAS\n"
                                         f"Dirección: {operacion['direccion']}\n"
                                         f"RoE actual aproximado: {roe_actual:+.1f}% | "
                                         f"máximo observado: "
                                         f"{operacion['max_roe_observed']:+.1f}%\n"
                                         f"Han pasado {horas_abierta:.1f} horas y la operación "
                                         f"no ha alcanzado +{BTC_STALLED_TRADE_ALERT_TARGET_ROE:.0f}% "
-                                        "RoE. La falta de avance a favor de la señal puede advertir "
-                                        "de pérdida de impulso o de un posible cambio de tendencia "
+                                        "RoE (umbral del aviso; no cambia el TP configurado). "
+                                        "Si se mantiene cerca del +15%, puede advertir de pérdida "
+                                        "de impulso o de un posible cambio fuerte de tendencia "
                                         "en contra.\n"
-                                        "Valora vigilarla y gestionar el riesgo. Este aviso es "
-                                        "informativo: el bot no cerrará ni modificará la operación."
+                                        "Mantén el SL original: si se ejecuta, se asume la pérdida. "
+                                        "No añadas posiciones en la misma dirección de la señal. "
+                                        "Un movimiento así podría deberse a una subida o caída "
+                                        "artificial del precio, aunque el bot no puede confirmar "
+                                        "manipulación solo con estos datos.\n"
+                                        "Aviso informativo: el bot no cerrará ni modificará la "
+                                        "operación, ni abrirá posiciones adicionales."
                                     )
                                     print(mensaje)
                                     operacion["stall_alert_retry_at"] = (
@@ -1907,7 +1919,7 @@ async def _motor_sfp_async():
                         "GANADA" if pnl > 0 else "PERDIDA" if pnl < 0 else "CERRADA EN EQUILIBRIO"
                     )
                     mensaje = (
-                        f"🧾 CIERRE SFP CONFIRMADO | {symbol}\n"
+                        f"🧾 CIERRE CONFIRMADO | {symbol}\n"
                         f"Dirección: {operacion['direccion']}\n"
                         f"Resultado: {resultado_texto}\n"
                         f"PnL realizado informado por Bitget: {pnl:+.8f} USDT\n"
@@ -1974,43 +1986,150 @@ def telegram_listener():
                     chat_id = message.get("chat", {}).get("id")
                     text = (message.get("text") or "").strip().lower()
                     if text in {"/trump", "/mentetrump", "/trumpmind", "trump", "mentetrump"}:
-                        enviar_parte_diario_mente_trump(chat_id=chat_id)
+                        enviar_senal_telegram(
+                            "📰 El resumen de titulares RSS se publica automáticamente una "
+                            f"vez al día, a las {RESUMEN_MACRO_HORA}, hora de Madrid. "
+                            "Este comando no inicia una consulta adicional.",
+                            chat_id=chat_id,
+                        )
                 if "callback_query" in update:
                     callback = update["callback_query"]
-                    chat_id = callback.get("message", {}).get("chat", {}).get("id")
-                    requests.post(
-                        f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/answerCallbackQuery",
-                        json={
-                            "callback_query_id": callback.get("id"),
-                            "text": "El bot solo envía señales automáticas SFP de Bitget.",
-                        },
-                        timeout=10,
-                    )
-                    mensaje = callback.get("message", {})
-                    message_id = mensaje.get("message_id")
-                    if chat_id and message_id:
-                        requests.post(
-                            f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/editMessageReplyMarkup",
-                            json={
-                                "chat_id": chat_id,
-                                "message_id": message_id,
-                                "reply_markup": {"inline_keyboard": []},
-                            },
-                            timeout=10,
+                    callback_data = callback.get("data", "")
+                    if callback_data.startswith("sfp_direction:"):
+                        _procesar_callback_direccion_sfp(callback)
+                    else:
+                        mensaje = callback.get("message", {})
+                        chat_id = mensaje.get("chat", {}).get("id")
+                        _responder_callback_telegram(
+                            callback.get("id"),
+                            "El bot solo envía señales automáticas de Bitget.",
                         )
+                        message_id = mensaje.get("message_id")
+                        if chat_id and message_id:
+                            _editar_teclado_telegram(
+                                chat_id,
+                                message_id,
+                                {"inline_keyboard": []},
+                            )
         except Exception as e:
             print(f"⚠️ Error en listener de Telegram: {e}")
         time.sleep(2)
 
 
+def _telegram_post(method, payload):
+    response = requests.post(
+        f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/{method}",
+        json=payload,
+        timeout=10,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError(f"Telegram {method} rechazó la solicitud: {result}")
+    return result
+
+
+def _responder_callback_telegram(callback_id, text, show_alert=False):
+    if not callback_id:
+        raise RuntimeError("Telegram envió un callback sin identificador.")
+    _telegram_post(
+        "answerCallbackQuery",
+        {
+            "callback_query_id": callback_id,
+            "text": text,
+            "show_alert": show_alert,
+        },
+    )
+
+
+def _editar_teclado_telegram(chat_id, message_id, reply_markup):
+    _telegram_post(
+        "editMessageReplyMarkup",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": reply_markup,
+        },
+    )
+
+
+def _procesar_callback_direccion_sfp(callback):
+    callback_id = callback.get("id")
+    usuario_id = callback.get("from", {}).get("id")
+    if not es_admin_del_canal(usuario_id):
+        _responder_callback_telegram(
+            callback_id,
+            "Solo los administradores pueden cambiar las direcciones.",
+            show_alert=True,
+        )
+        return
+
+    partes = callback.get("data", "").split(":")
+    if len(partes) != 3:
+        _responder_callback_telegram(callback_id, "Selección no válida.", show_alert=True)
+        return
+    _, par, modo = partes
+    symbol = {
+        "BTC": "BTC/USDT:USDT",
+        "SPCX": "SPCX/USDT:USDT",
+    }.get(par)
+    if symbol is None:
+        _responder_callback_telegram(callback_id, "Selección no válida.", show_alert=True)
+        return
+    try:
+        directions_for_mode(modo)
+    except ValueError:
+        _responder_callback_telegram(callback_id, "Selección no válida.", show_alert=True)
+        return
+    if par == "SPCX" and modo == "AMBAS":
+        _responder_callback_telegram(
+            callback_id,
+            "SPCX solo permite elegir COMPRA o VENTA.",
+            show_alert=True,
+        )
+        return
+
+    mensaje = callback.get("message", {})
+    chat_id = mensaje.get("chat", {}).get("id")
+    message_id = mensaje.get("message_id")
+    if not chat_id or not message_id or str(chat_id) != str(CHAT_ID_CANAL):
+        _responder_callback_telegram(
+            callback_id,
+            "Este control solo funciona en el mensaje original del canal.",
+            show_alert=True,
+        )
+        return
+    if _modo_direccion_actual_sfp(symbol) == modo:
+        _responder_callback_telegram(callback_id, f"{par}: esa opción ya está seleccionada.")
+        return
+
+    _establecer_modo_direccion_sfp(symbol, modo)
+    _responder_callback_telegram(
+        callback_id,
+        f"{par}: {SFP_DIRECTION_MODE_LABELS[modo]} hasta el próximo reinicio.",
+    )
+
+    _telegram_post(
+        "editMessageText",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": _mensaje_inicio_bot(),
+            "reply_markup": _teclado_direcciones_sfp(),
+        },
+    )
+
+
 def motor_de_trading():
-    global ULTIMO_PARTE_TRUMP_ENVIADO
+    global ULTIMO_RESUMEN_MACRO_ENVIADO
     print("🚀 Iniciando motor analítico duplicador de TradingView...")
     print("📊 Señales binarias desactivadas.")
     time.sleep(5)
 
-    alerta_inicio = "🦈 *CLUB MARKETSHARKS*\n\n🤖 Servicio iniciado. Las señales de trading publicadas corresponden a la estrategia SFP de Bitget."
-    enviar_senal_telegram(alerta_inicio)
+    enviar_senal_telegram(
+        _mensaje_inicio_bot(),
+        reply_markup=_teclado_direcciones_sfp(),
+    )
 
     while True:
         try:
@@ -2021,7 +2140,7 @@ def motor_de_trading():
             resetear_estado_diario_si_es_necesario()
             limpiar_solicitudes_si_es_necesario()
             hora_actual = hora_espana()
-            intentar_enviar_parte_diario_trump(hora_actual)
+            intentar_enviar_resumen_macro(hora_actual)
             if not LEGACY_SIGNALS_ENABLED:
                 time.sleep(60)
                 continue
