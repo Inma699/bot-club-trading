@@ -12,6 +12,18 @@ BREAKOUT_MIN_4H_TOUCHES = 3
 BREAKOUT_MIN_BODY_ATR = 1.5
 BTC_STALLED_TRADE_ALERT_AFTER_SECONDS = 4 * 60 * 60
 BTC_STALLED_TRADE_ALERT_TARGET_ROE = 30.0
+SFP_DIRECTION_MODES = {
+    "COMPRA": frozenset({"COMPRA"}),
+    "VENTA": frozenset({"VENTA"}),
+    "AMBAS": frozenset({"COMPRA", "VENTA"}),
+}
+
+
+def directions_for_mode(mode: str) -> frozenset[str]:
+    try:
+        return SFP_DIRECTION_MODES[mode]
+    except KeyError as error:
+        raise ValueError(f"Modo de dirección no válido: {mode}") from error
 
 
 def is_sfp_trading_window_open(now: datetime | None = None) -> bool:
